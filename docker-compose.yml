@@ -1,0 +1,92 @@
+# ============================================================
+#  V2H-Rectify — 全服務啟動
+#  包含: vLLM  |  backend (FastAPI)  |  frontend (nginx)
+#
+#  使用方式:
+#    docker compose up --build -d
+#
+#  可透過根目錄 .env 覆蓋下列變數：
+#    HUGGING_FACE_HUB_TOKEN  — 下載需授權的 HF 模型時使用
+#    VLLM_MODEL              — 預設 Qwen/Qwen3-VL-2B-Instruct
+#    CUDA_DEVICE             — backend 推論裝置，預設 cuda:0
+# ============================================================
+
+services:
+
+  # ----------------------------------------------------------
+  #  vLLM — OpenAI 相容推論伺服器
+  #  容器內 port: 8000  →  對外 port: 8001
+  # ----------------------------------------------------------
+  vllm:
+    image: vllm/vllm-openai:latest
+    ports:
+      - "8001:8000"
+    volumes:
+      - huggingface_cache:/root/.cache/huggingface
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+    command: >
+      --model ${VLLM_MODEL:-Qwen/Qwen3-VL-2B-Instruct}
+      --dtype auto
+      --max-model-len 4096
+      --gpu-memory-utilization 0.45
+    ipc: host
+    shm_size: "8g"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  #  backend — FastAPI + CRAFT OCR
+  #  容器內 port: 8000  →  對外 port: 8080
+  # ----------------------------------------------------------
+  backend:
+    build: ./backend
+    ports:
+      - "8080:8000"
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      # 將 VLM 指向同網路內的 vllm 服務
+      VLM__VLLM_BASE_URL: http://vllm:8000/v1
+      CUDA_DEVICE: ${CUDA_DEVICE:-cuda:0}
+    volumes:
+      - ./backend/uploads:/app/uploads
+    depends_on:
+      vllm:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # ----------------------------------------------------------
+  #  frontend — React/Vite (build) + nginx (serve)
+  #  對外 port: 3000
+  # ----------------------------------------------------------
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  huggingface_cache:
