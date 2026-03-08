@@ -1,0 +1,36 @@
+# ============================================================
+# V2H-Rectify — Root .gitignore
+# ============================================================
+
+# ── Backend ─────────────────────────────────────────────────
+backend/.env
+backend/uploads/
+backend/debug/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/**/*.pyo
+backend/.pytest_cache/
+backend/**/.pytest_cache/
+backend/*.egg-info/
+backend/dist/
+backend/build/
+backend/.venv/
+backend/venv/
+backend/chat.json
+
+# ── Frontend ─────────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/*.local
+frontend/.DS_Store
+
+# ── OS / Editor ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.suo
+*.sw?

@@ -1,0 +1,104 @@
+"""Pydantic schemas for API request/response models."""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import List, Optional
+
+from pydantic import BaseModel, Field
+
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+class TaskStatus(str, Enum):
+    pending = "pending"
+    processing = "processing"
+    completed = "completed"
+    failed = "failed"
+
+
+# ---------------------------------------------------------------------------
+# Corner detection / perspective correction
+# ---------------------------------------------------------------------------
+
+class Point(BaseModel):
+    x: float
+    y: float
+
+
+class CornerDetectResponse(BaseModel):
+    """Auto-detected corners of the essay paper."""
+    task_id: str = ""
+    corners: List[Point] = Field(..., min_length=4, max_length=4)
+    confidence: float = Field(ge=0.0, le=1.0)
+    preview_url: str = ""
+
+
+class CornerCorrectRequest(BaseModel):
+    """User-adjusted corners for perspective correction."""
+    task_id: str
+    corners: List[Point] = Field(..., min_length=4, max_length=4)
+
+
+class CornerCorrectResponse(BaseModel):
+    corrected: bool = True
+    preview_url: str = ""
+
+
+# ---------------------------------------------------------------------------
+# OCR
+# ---------------------------------------------------------------------------
+
+class OCROptions(BaseModel):
+    auto_rotate: bool = True
+    remove_print: bool = True
+    auto_split: bool = True
+
+
+class OCRSubmitResponse(BaseModel):
+    task_id: str
+    status: TaskStatus = TaskStatus.pending
+
+
+class ColumnData(BaseModel):
+    """Per-column OCR data for manuscript (稿紙) layout reconstruction."""
+    col_index: int
+    text: str
+    spacing_indexes: List[int]
+    num_rows: int
+
+
+class OCRStatusResponse(BaseModel):
+    task_id: str
+    status: TaskStatus
+    progress: float = Field(0.0, ge=0.0, le=1.0)
+    title: Optional[str] = None
+    text: Optional[str] = None
+    columns: List[ColumnData] = Field(default_factory=list)
+    rotation_angle: Optional[float] = None
+    elapsed_seconds: Optional[float] = None
+    error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+class HealthResponse(BaseModel):
+    status: str = "ok"
+    craft_loaded: bool = False
+    vlm_backend: str = ""
+    version: str = "3.0.0"
+
+
+# ---------------------------------------------------------------------------
+# WebSocket progress messages
+# ---------------------------------------------------------------------------
+
+class WSProgressMessage(BaseModel):
+    task_id: str
+    stage: str = ""
+    progress: float = 0.0
+    message: str = ""
