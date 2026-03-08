@@ -115,8 +115,18 @@ docker compose down
 | 部署        | Docker Compose                           |
 
 
+## 相關文件
+
+| 文件 | 說明 |
+|---|---|
+| [HANDOVER.md](HANDOVER.md) | 完整交接文件 — 架構、模組導覽、部署、已知問題、維護 SOP |
+| [LLM.txt](LLM.txt) | 給 LLM Agent 的結構化 codebase 參考 — 所有檔案/函式/API/設定的索引 |
+
+---
+
 ## 小缺陷
 1. 識別中的進度條雖然存在，也有websocket可以獲取當前狀態，但實際上現在是使用 `/ocr/{taskid}` 的API進行polling，且不會分段回傳，導致進度條實際上沒有作用
 2. 本來後端要使用redis與mqtt(之類的)進行任務的排成推送，但在用量沒有很大或需要分離部署的情況沒有將其完成，當前使用較為簡單的asyncio evenloop來完成
 3. 前端有點醜
 4. Docker 未驗證，本地部屬建議直接啟動即可
+5. 沒做unit test

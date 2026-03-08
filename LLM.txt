@@ -1,0 +1,589 @@
+# V2H-Rectify — LLM Agent Codebase Reference
+# Version: 3.0.0
+# Language: Traditional Chinese Handwritten OCR System
+# Updated: 2026-03-09
+
+## SYSTEM IDENTITY
+
+V2H-Rectify (Vertical-to-Horizontal Rectify) is a full-stack OCR system that detects, corrects perspective, and transcribes Traditional Chinese handwritten text from scanned manuscript paper (稿紙). It converts vertical (top-to-bottom, right-to-left) handwriting into horizontal digital text.
+
+## ARCHITECTURE
+
+### Service Topology
+
+```
+frontend (nginx:80 → host:3000)
+  ├── serves React SPA static files
+  ├── proxies /api/* → backend:8000
+  └── upgrades /api/v1/ws/* to WebSocket → backend:8000
+
+backend (uvicorn:8000 → host:8080)
+  ├── FastAPI with CRAFT text detection (GPU)
+  ├── OpenCV image processing pipeline
+  └── calls VLM via OpenAI-compatible API
+
+vllm (vllm:8000 → host:8001)
+  └── OpenAI-compatible inference server (Qwen2.5-VL)
+```
+
+### Request Flow
+
+```
+User uploads image
+  → POST /api/v1/corner/detect        (returns corners + task_id)
+  → POST /api/v1/corner/correct       (perspective warp, stores corrected image)
+  → POST /api/v1/ocr/upload           (starts async OCR, returns task_id)
+  → WS /api/v1/ws/{task_id}           (real-time progress)
+  → GET /api/v1/ocr/{task_id}         (poll for result)
+  → Response: { title, text, columns[], rotation_angle, elapsed_seconds }
+```
+
+## DIRECTORY MAP
+
+```
+V2H-Rectify/
+├── docker-compose.yml                 # 3-service orchestration (vllm + backend + frontend)
+├── README.md                          # Quick start guide (Traditional Chinese)
+├── HANDOVER.md                        # Handover document for human maintainers
+├── LLM.txt                            # This file — LLM agent reference
+│
+├── backend/
+│   ├── Dockerfile                     # Python 3.11-slim + OpenCV system libs
+│   ├── pyproject.toml                 # Dependencies: torch, easyocr, fastapi, opencv, openai
+│   ├── .env.example                   # Environment variable template
+│   │
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── app.py                     # FastAPI factory + lifespan (service init/cleanup)
+│   │   ├── deps.py                    # Dependency injection: get_craft(), get_vlm(), get_pipeline()
+│   │   ├── schemas.py                 # All Pydantic request/response DTOs
+│   │   ├── ws.py                      # WebSocket progress broadcaster
+│   │   └── routes/
+│   │       ├── __init__.py
+│   │       ├── corner.py              # POST /corner/detect, POST /corner/correct
+│   │       ├── ocr.py                 # POST /ocr/upload, GET /ocr/{task_id}
+│   │       └── health.py             # GET /health
+│   │
+│   ├── config/
+│   │   ├── __init__.py
+│   │   └── settings.py               # Pydantic Settings v2: CRAFTSettings, VLMSettings, OCRPipelineSettings, ServerSettings
+│   │
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── craft_detector.py          # CRAFT text detection wrapper, CRAFTResult dataclass
+│   │   ├── grid_extractor.py          # Projection-based row/column grid detection
+│   │   ├── image_utils.py             # pil_to_bgr(), bgr_to_pil(), split_wide_image()
+│   │   ├── perspective.py             # Corners dataclass, detect_corners(), warp_perspective()
+│   │   ├── print_removal.py           # Classify printed vs handwritten, crop print region
+│   │   ├── rotation.py                # Multi-method skew estimation + correction
+│   │   └── text_reformat.py           # Vertical-to-horizontal column conversion, title detection
+│   │
+│   ├── services/
+│   │   ├── __init__.py
+│   │   ├── craft_service.py           # Thread-safe batched CRAFT inference service
+│   │   ├── vlm_service.py             # Multi-backend VLM strategy (vllm/gemini/openai)
+│   │   └── ocr_pipeline.py            # End-to-end OCR orchestrator (~380 lines)
+│   │
+│   └── scripts/                       # Empty, reserved
+│
+└── frontend/
+    ├── Dockerfile                     # Multi-stage: Node 20 build → Nginx 1.27 serve
+    ├── nginx.conf                     # SPA fallback + /api proxy + WebSocket upgrade
+    ├── package.json                   # React 19, Konva, react-dropzone, Tailwind CSS 4
+    ├── vite.config.ts                 # Dev proxy: /api → http://localhost:8080
+    ├── tsconfig.json                  # Project references
+    ├── tsconfig.app.json              # Strict mode, ES2022 target
+    ├── index.html                     # SPA entry point
+    │
+    └── src/
+        ├── App.tsx                    # Root: <Layout> + <Routes> (/ and /result)
+        ├── main.tsx                   # ReactDOM.createRoot + BrowserRouter
+        ├── index.css                  # Tailwind CSS imports
+        │
+        ├── components/
+        │   ├── Layout.tsx             # Sticky navbar + main content area
+        │   ├── ImageDropzone.tsx      # Drag-and-drop file upload (react-dropzone)
+        │   ├── CornerEditor.tsx       # Konva Canvas: 4 draggable corners + magnifier
+        │   ├── ManuscriptView.tsx     # RTL grid renderer for vertical Chinese manuscript
+        │   └── ProgressBar.tsx        # Progress bar with ARIA
+        │
+        ├── hooks/
+        │   └── useOCRProgress.ts      # WebSocket + REST polling state manager
+        │
+        ├── lib/
+        │   ├── api.ts                 # All REST/WS API calls
+        │   └── types.ts              # TypeScript types mirroring backend schemas
+        │
+        └── pages/
+            ├── UploadPage.tsx         # Upload → Corner editing → OCR submit
+            └── ResultPage.tsx         # Real-time progress + result display (linear/manuscript views)
+```
+
+## BACKEND MODULES
+
+### api/app.py
+- **Exports**: `app` (FastAPI instance), `create_app()` factory
+- **Lifespan**: `async def lifespan(app)` — initializes CRAFTService, VLMService, OCRPipeline on startup; calls `craft_svc.stop()` + `clear_services()` on shutdown
+- **Middleware**: CORS with `allow_origins=["*"]`
+- **Route prefix**: `/api/v1`
+
+### api/deps.py
+- **Exports**: `get_craft()`, `get_vlm()`, `get_pipeline()` — FastAPI `Depends()` callables
+- **Pattern**: Module-level singletons set by `set_services()` during lifespan, cleared by `clear_services()`
+
+### api/schemas.py
+- **Exports** (all Pydantic BaseModel):
+  - `TaskStatus` (enum: pending, processing, completed, failed)
+  - `Point` (x: float, y: float)
+  - `CornerDetectResponse` (task_id, corners: List[Point], confidence)
+  - `CornerCorrectRequest` (task_id, corners: List[Point])
+  - `CornerCorrectResponse` (corrected: bool, preview_url)
+  - `OCROptions` (auto_rotate, remove_print, auto_split — all bool, default True)
+  - `OCRSubmitResponse` (task_id, status)
+  - `ColumnData` (col_index, text, spacing_indexes: List[int], num_rows)
+  - `OCRStatusResponse` (task_id, status, progress, title?, text?, columns[], rotation_angle?, elapsed_seconds?, error?)
+  - `HealthResponse` (status, craft_loaded, vlm_backend, version)
+  - `WSProgressMessage` (task_id, stage, progress, message)
+
+### api/ws.py
+- **Exports**: `router` (APIRouter), `broadcast_progress(task_id, stage, progress, message)`
+- **Endpoint**: `WS /ws/{task_id}` — accepts connection, adds to `_connections` dict, keeps alive until client disconnects
+- **Broadcast**: sends `WSProgressMessage` JSON to all connected clients for a task_id
+
+### api/routes/corner.py
+- **Prefix**: `/corner`
+- **In-memory store**: `_pending_images: dict[str, np.ndarray]` — maps task_id to BGR image
+- `POST /detect`: Upload image → `detect_corners(img)` → returns corners + task_id. If detection fails or area ratio < 0.35, falls back to full image corners with confidence=0
+- `POST /correct`: Takes `CornerCorrectRequest` → `warp_perspective(img, corners)` → stores warped image back in `_pending_images`
+
+### api/routes/ocr.py
+- **Prefix**: `/ocr`
+- **In-memory store**: `_tasks: Dict[str, dict]` — maps task_id to {status, progress, result, error}
+- `POST /upload`: If task_id provided and in `_pending_images`, use warped image; else decode uploaded file. Runs `_run_ocr()` in executor (non-blocking). Returns task_id + status=processing
+- `GET /{task_id}`: Returns `OCRStatusResponse` with current status, result data if completed
+- **`_run_ocr()`**: Blocking function that calls `pipeline.run()`, updates `_tasks` on completion/failure
+
+### api/routes/health.py
+- `GET /health`: Returns `HealthResponse` with craft_loaded and vlm_backend status
+
+### config/settings.py
+- **Root class**: `Settings(BaseSettings)` with `env_nested_delimiter="__"`
+- **Sub-configs**: `CRAFTSettings`, `VLMSettings`, `OCRPipelineSettings`, `ServerSettings`
+- **Singleton**: `get_settings()` returns cached `Settings` instance
+- **Env file**: reads `.env` from working directory
+- **Nesting**: Use `__` delimiter, e.g. `VLM__BACKEND=gemini`, `PIPELINE__MAX_WORKERS=8`
+
+### services/craft_service.py
+- **Class**: `CRAFTService`
+- **Pattern**: Background worker thread + Queue for batched inference
+- **Config**: batch_size (default 8), batch_timeout (default 0.1s)
+- **Key methods**:
+  - `__init__(device, craft_settings)` — loads EasyOCR CRAFT model
+  - `start()` / `stop()` — worker thread lifecycle
+  - `detect(image) → CRAFTResult` — submit single image, blocks until batch processed
+  - `is_ready` (property) — whether worker is running
+- **Thread safety**: Uses `queue.Queue` and `threading.Event` for synchronization
+
+### services/vlm_service.py
+- **Class**: `VLMService`
+- **Pattern**: Strategy pattern with 3 backends
+- **Factory**: `VLMService.from_settings(vlm_settings)` — selects backend based on `vlm_settings.backend`
+- **Backends**: vllm (OpenAI client), gemini (google-genai), openai (OpenAI client)
+- **Key methods**:
+  - `recognize(image_b64: str, prompt: str) → str` — sends base64 image + prompt to VLM
+  - `backend_name` (property) — current backend identifier
+- **All backends** use OpenAI Chat Completions format with vision message
+
+### services/ocr_pipeline.py
+- **Class**: `OCRPipeline`
+- **Constructor**: `__init__(craft_svc, vlm_svc, pipeline_settings)`
+- **Key method**: `run(pil_img, auto_rotate, remove_print, auto_split) → OCRResult`
+- **Return type**: `OCRResult` dataclass with fields: title, text, columns (list), rotation_angle, elapsed_seconds
+- **Pipeline stages** (in order):
+  1. `split_wide_image()` if aspect_ratio > 2.0 and auto_split=True
+  2. `craft_svc.detect()` — CRAFT text detection
+  3. `correct_rotation()` if auto_rotate=True — uses rotation.py
+  4. `remove_print_region()` if remove_print=True — uses print_removal.py
+  5. `extract_grid()` — grid discovery via grid_extractor.py
+  6. `reformat_columns()` — vertical→horizontal strips via text_reformat.py
+  7. **Concurrent VLM OCR** — ThreadPoolExecutor(max_workers=4), one task per column
+  8. `detect_title()` — title extraction + punctuation normalization
+- **Column OCR result**: Each column → `ColumnResult(col_index, text, spacing_indexes, num_rows)`
+
+### core/perspective.py
+- **Exports**: `Corners` (dataclass: tl, tr, br, bl as tuples), `detect_corners(img_bgr) → Corners | None`, `warp_perspective(img_bgr, corners) → np.ndarray`
+- **Corner detection**: Uses edge detection + contour finding + polygon approximation
+- `Corners.as_array()` → np.ndarray shape (4, 2), `Corners.to_list()` → list of tuples
+
+### core/craft_detector.py
+- **Exports**: `CRAFTResult` (immutable dataclass: boxes, confidences, image_shape), `run_craft(model, image) → CRAFTResult`
+- **CRAFTResult.boxes**: list of bounding boxes (each is 4-point polygon)
+
+### core/grid_extractor.py
+- **Exports**: `extract_grid(boxes, img_shape) → GridResult`, `GridResult` (dataclass: rows, cols, cells)
+- **Method**: Horizontal/vertical projection of box centroids → peak detection → row/column boundaries
+
+### core/rotation.py
+- **Exports**: `estimate_angle(boxes) → float`, `correct_rotation(img, boxes) → tuple[np.ndarray, float]`
+- **Angle estimation**: Combines minAreaRect angles + PCA + linear regression on centroids
+- **Thresholds**: min_centroids=10, min_clusters=3, max_angle=45°
+
+### core/print_removal.py
+- **Exports**: `classify_print_handwritten(boxes) → tuple[list, list]`, `remove_print_region(img, boxes) → np.ndarray`
+- **Method**: Weighted centroid classification — printed text has regular spacing/angles vs handwritten
+
+### core/text_reformat.py
+- **Exports**: `reformat_columns(img, grid) → list[np.ndarray]`, `detect_title(columns_text) → tuple[str, str]`
+- **Column conversion**: Crops vertical columns from grid, rotates each to horizontal strip
+- **Title detection**: First column analysis for title text
+
+### core/image_utils.py
+- **Exports**: `pil_to_bgr(pil_img) → np.ndarray`, `bgr_to_pil(bgr) → PIL.Image`, `split_wide_image(img) → list[np.ndarray]`
+
+## API ENDPOINTS — FULL SIGNATURES
+
+### POST /api/v1/corner/detect
+- **Request**: `multipart/form-data` with `file: UploadFile`
+- **Response 200**: `{ task_id: str, corners: [{x, y}, {x, y}, {x, y}, {x, y}], confidence: float(0-1), preview_url: str }`
+- **Corner order**: [top-left, top-right, bottom-right, bottom-left]
+- **Response 400**: Invalid image
+- **Side effect**: Stores original BGR image in `_pending_images[task_id]`
+
+### POST /api/v1/corner/correct
+- **Request**: `application/json` → `{ task_id: str, corners: [{x, y}, ...] }`
+- **Response 200**: `{ corrected: true, preview_url: "" }`
+- **Response 404**: Task not found or already consumed
+- **Side effect**: Replaces `_pending_images[task_id]` with warped image
+
+### POST /api/v1/ocr/upload
+- **Request**: `multipart/form-data` with fields:
+  - `file: UploadFile` (required)
+  - `auto_rotate: bool` (default true)
+  - `remove_print: bool` (default true)
+  - `auto_split: bool` (default true)
+  - `task_id: str | null` (optional — reuses warped image from corner/correct)
+- **Response 200**: `{ task_id: str, status: "processing" }`
+- **Response 400**: Invalid image (only if no task_id with pending image)
+- **Side effect**: Starts background OCR via `run_in_executor`
+
+### GET /api/v1/ocr/{task_id}
+- **Response 200**: `{ task_id, status, progress(0-1), title?, text?, columns: [{col_index, text, spacing_indexes[], num_rows}], rotation_angle?, elapsed_seconds?, error? }`
+- **Status transitions**: pending → processing → completed | failed
+- **Response 404**: Task not found
+
+### WS /api/v1/ws/{task_id}
+- **Protocol**: WebSocket
+- **Server→Client messages**: `{ task_id, stage, progress(0-1), message }`
+- **Note**: Currently not actively used by pipeline (progress not broadcast during processing)
+
+### GET /api/v1/health
+- **Response 200**: `{ status: "ok", craft_loaded: bool, vlm_backend: str, version: "3.0.0" }`
+
+## FRONTEND MODULES
+
+### App.tsx
+- Routes: `/` → UploadPage, `/result` → ResultPage
+- Wrapped in `<Layout>` (navbar + content)
+
+### pages/UploadPage.tsx
+- **State machine**: `step: "upload" | "corner" | "submitting"`
+- **Step "upload"**: Shows `<ImageDropzone onFile={...} />`, on file selected → POST /corner/detect
+- **Step "corner"**: Shows `<CornerEditor corners={...} image={...} onConfirm={...} onSkip={...} />`
+  - Confirm → POST /corner/correct → POST /ocr/upload → navigate
+  - Skip → POST /ocr/upload directly → navigate
+- **Step "submitting"**: Loading indicator while submitting
+
+### pages/ResultPage.tsx
+- Reads `taskId` from URL query params
+- Uses `useOCRProgress(taskId)` hook
+- Shows `<ProgressBar>` during processing
+- On completion: toggle between linear view (`<pre>` text) and manuscript view (`<ManuscriptView>`)
+- Copy button: copies title + text to clipboard
+
+### components/CornerEditor.tsx
+- **Props**: `imgSrc: string, corners: Point[], onConfirm: (corners: Point[]) => void, onSkip: () => void`
+- **Tech**: Konva Stage + Layer with background Image, 4 draggable Circles (TL=red, TR=orange, BR=green, BL=blue), Line polygon
+- **Magnifier**: 140×140px at 2.4x zoom with crosshair, shown during drag
+- **Auto-scale**: fits viewport at max 82% height or 980px
+
+### components/ImageDropzone.tsx
+- **Props**: `onFile: (file: File) => void`
+- Accepts: `image/*` (PNG, JPG, WEBP, BMP, TIFF), maxFiles: 1
+- Visual feedback on drag-over
+
+### components/ManuscriptView.tsx
+- **Props**: `columns: ColumnData[], cellSize?: number (default 36)`
+- Renders RTL grid (`dir="rtl"`) — column 0 is rightmost (traditional Chinese writing order)
+- Each cell renders one character; spacing_indexes insert empty rows
+
+### components/ProgressBar.tsx
+- **Props**: `progress: number (0-1), stage?: string`
+- ARIA accessible progress bar
+
+### hooks/useOCRProgress.ts
+- **Input**: `taskId: string | null`
+- **Returns**: `{ status, progress, stage, title, text, columns, error, elapsed }`
+- **Behavior**: Opens WebSocket + starts 2s polling interval. Cleans up on completion/failure or unmount.
+
+### lib/api.ts
+- `fetchHealth() → HealthResponse`
+- `detectCorners(file: File) → CornerDetectResponse & { task_id }`
+- `correctCorners(req: CornerCorrectRequest) → CornerCorrectResponse`
+- `submitOCR(file: File, opts?: { auto_rotate?, remove_print?, auto_split?, task_id? }) → OCRSubmitResponse`
+- `pollOCRStatus(taskId: string) → OCRStatusResponse`
+- `connectProgressWS(taskId: string) → WebSocket` (ws://host/api/v1/ws/{taskId})
+- All use `fetch()` with base path `/api/v1`
+
+### lib/types.ts
+- Mirrors `backend/api/schemas.py` exactly
+- Key types: `Point`, `TaskStatus`, `CornerDetectResponse`, `CornerCorrectRequest`, `CornerCorrectResponse`, `ColumnData`, `OCRSubmitResponse`, `OCRStatusResponse`, `HealthResponse`, `WSProgressMessage`
+
+## CONFIGURATION REFERENCE
+
+### Settings Hierarchy (backend/config/settings.py)
+
+```
+Settings (root)
+├── cuda_device: str = "cuda:7"          # env: CUDA_DEVICE
+├── log_level: str = "INFO"              # env: LOG_LEVEL
+├── log_format: "simple"|"default"|"detailed" = "default"
+│
+├── craft: CRAFTSettings                 # env prefix: CRAFT__
+│   ├── languages: list[str] = ["ch_tra"]
+│   ├── canvas_size: int = 2560
+│   ├── text_threshold: float = 0.7
+│   ├── link_threshold: float = 0.4
+│   ├── low_text: float = 0.4
+│   ├── mag_ratio: float = 1.0
+│   ├── batch_size: int = 8             # range: 1-64
+│   └── batch_timeout: float = 0.1      # range: ≥0.01
+│
+├── vlm: VLMSettings                    # env prefix: VLM__
+│   ├── backend: "vllm"|"gemini"|"openai" = "vllm"
+│   ├── vllm_base_url: str = "http://localhost:8000/v1"
+│   ├── vllm_api_key: str = "EMPTY"
+│   ├── vllm_model_name: str = "Qwen/Qwen3-VL-2B-Instruct"
+│   ├── gemini_api_key: str = ""
+│   ├── gemini_model_name: str = "gemini-2.0-flash"
+│   ├── openai_api_key: str = ""
+│   └── openai_model_name: str = "gpt-4o"
+│
+├── pipeline: OCRPipelineSettings       # env prefix: PIPELINE__
+│   ├── auto_rotate: bool = True
+│   ├── remove_print: bool = True
+│   ├── auto_split: bool = True
+│   ├── max_workers: int = 4            # range: 1-32
+│   ├── timeout: int = 120              # range: ≥10
+│   ├── rotation_min_centroids: int = 10
+│   ├── rotation_min_clusters: int = 3
+│   ├── rotation_max_angle: float = 45.0
+│   ├── print_angle_threshold: float = 3.0
+│   ├── print_row_ratio_threshold: float = 0.8
+│   ├── split_aspect_ratio: float = 2.0
+│   ├── debug_enabled: bool = False
+│   └── debug_dir: Path = "./debug/ocr_pipeline"
+│
+└── server: ServerSettings              # env prefix: SERVER__
+    ├── host: str = "0.0.0.0"
+    ├── port: int = 8080
+    ├── workers: int = 1
+    ├── upload_dir: Path = "./uploads"
+    └── max_upload_size_mb: int = 20
+```
+
+### Environment Variable Examples
+```bash
+CUDA_DEVICE=cuda:0
+VLM__BACKEND=gemini
+VLM__GEMINI_API_KEY=AIza...
+PIPELINE__MAX_WORKERS=8
+PIPELINE__DEBUG_ENABLED=true
+CRAFT__BATCH_SIZE=16
+```
+
+### Docker Compose Variables (root .env)
+```bash
+VLLM_MODEL=Qwen/Qwen3-VL-2B-Instruct
+CUDA_DEVICE=cuda:0
+HUGGING_FACE_HUB_TOKEN=hf_...
+```
+
+## DATA FLOW — END-TO-END OCR PIPELINE
+
+```
+Input: PIL.Image (from uploaded file or perspective-corrected image)
+  │
+  ├─[1] split_wide_image()           # if aspect_ratio > 2.0 and auto_split=True
+  │     → splits into left/right halves, processes each independently
+  │
+  ├─[2] craft_svc.detect(img)        # CRAFT text detection (batched, GPU)
+  │     → CRAFTResult { boxes: list[polygon], confidences, image_shape }
+  │
+  ├─[3] correct_rotation(img, boxes) # if auto_rotate=True
+  │     → rotated image + rotation_angle (degrees)
+  │     → method: centroid clustering → minAreaRect + PCA + linear regression
+  │     → skips if < 10 centroids or < 3 clusters or angle > 45°
+  │
+  ├─[4] remove_print_region(img, boxes)  # if remove_print=True
+  │     → crops out printed header/footer regions
+  │     → method: weighted centroid classification (angle + spacing regularity)
+  │
+  ├─[5] extract_grid(boxes, img_shape)
+  │     → GridResult { rows: list[boundary], cols: list[boundary], cells }
+  │     → method: horizontal/vertical projection of centroids → peak detection
+  │
+  ├─[6] reformat_columns(img, grid)
+  │     → list[np.ndarray] — one horizontal image strip per column
+  │     → each column is a vertical slice of the manuscript, rotated 90°
+  │
+  ├─[7] CONCURRENT VLM OCR (ThreadPoolExecutor, max_workers=4)
+  │     for each column image:
+  │       → encode to base64
+  │       → vlm_svc.recognize(image_b64, prompt) → text string
+  │     → list of column texts
+  │
+  └─[8] detect_title(column_texts) + punctuation normalization
+        → title: str, body_text: str
+        → ColumnResult per column: { col_index, text, spacing_indexes, num_rows }
+
+Output: OCRResult { title, text, columns[], rotation_angle, elapsed_seconds }
+```
+
+## CONVENTIONS & PATTERNS
+
+### Backend Patterns
+- **Dependency Injection**: FastAPI `Depends()` with singleton getters in `deps.py`
+- **Lifespan Management**: `@asynccontextmanager async def lifespan(app)` for service lifecycle
+- **Strategy Pattern**: `VLMService` with pluggable backends via factory method
+- **Batching Pattern**: `CRAFTService` uses Queue + worker thread for GPU batch inference
+- **Executor Pattern**: OCR runs in `run_in_executor()` to avoid blocking event loop
+- **Immutable Results**: `CRAFTResult` and similar use frozen dataclasses
+- **Configuration**: Pydantic Settings v2 with `env_nested_delimiter="__"` and `.env` file
+- **In-memory state**: Both `_pending_images` and `_tasks` are plain dicts (not Redis)
+
+### Frontend Patterns
+- **No global state library**: All state via `useState` hooks at page level
+- **API centralization**: All backend calls in `lib/api.ts`
+- **Type mirroring**: `lib/types.ts` manually mirrors `backend/api/schemas.py`
+- **Dual progress tracking**: WebSocket (real-time) + REST polling (2s fallback) via `useOCRProgress`
+- **Task ID flow**: corner/detect → corner/correct → ocr/upload (same task_id)
+- **Canvas interaction**: Konva for corner editing (not HTML5 Canvas directly)
+
+### Naming Conventions
+- **Backend**: snake_case for files, functions, variables. PascalCase for classes.
+- **Frontend**: camelCase for files (except components: PascalCase.tsx), functions, variables. PascalCase for components and types.
+- **API paths**: `/api/v1/{resource}/{action}`, kebab-case not used
+- **Env vars**: UPPER_SNAKE_CASE, nested with `__` delimiter
+
+### Error Handling
+- **Backend routes**: HTTPException(400) for invalid input, HTTPException(404) for not found
+- **Core modules**: Return None or empty results on failure (graceful degradation), log warnings
+- **VLM calls**: Log warning on failure, return empty string for column
+- **Frontend**: `json<T>()` helper throws on non-ok response, polling ignores transient errors
+
+## KNOWN ISSUES & TECH DEBT
+
+1. **Progress bar non-functional**: Pipeline does not call `broadcast_progress()` during execution. WebSocket infrastructure exists but is not wired to pipeline stages.
+2. **In-memory task storage**: `_tasks` and `_pending_images` are dict-based. No persistence across restarts. Original plan was Redis + MQTT.
+3. **No tests**: Zero unit/integration tests. pytest + httpx configured in dev dependencies but unused.
+4. **No CI/CD**: No GitHub Actions or automation pipeline.
+5. **Docker unverified**: docker-compose.yml written but not tested on clean environment.
+6. **CORS wide open**: `allow_origins=["*"]` — should be restricted in production.
+7. **Frontend UI polish needed**: No loading skeletons, basic error display, minimal mobile optimization.
+8. **Type sync manual**: `frontend/src/lib/types.ts` must be manually kept in sync with `backend/api/schemas.py`.
+9. **GPU memory**: vLLM + CRAFT co-located needs ≥16GB VRAM. `gpu-memory-utilization: 0.45` in compose.
+10. **Default cuda_device mismatch**: `settings.py` defaults to `cuda:7` (dev machine), must override via env var.
+
+## RECIPES
+
+### Recipe: Add a new VLM backend (e.g., Anthropic Claude)
+
+1. Edit `backend/services/vlm_service.py`:
+   - Add a new strategy method (e.g., `_recognize_anthropic()`)
+   - Update `from_settings()` factory to handle `backend="anthropic"`
+2. Edit `backend/config/settings.py` → `VLMSettings`:
+   - Add `anthropic_api_key: str = ""`
+   - Add `anthropic_model_name: str = "claude-sonnet-4-20250514"`
+3. Update `backend/.env.example` with new variables
+4. Update `VLMSettings.backend` Literal type to include `"anthropic"`
+
+### Recipe: Add a new API endpoint
+
+1. Create `backend/api/routes/myroute.py`:
+   ```python
+   from fastapi import APIRouter
+   router = APIRouter(prefix="/myroute", tags=["myroute"])
+
+   @router.get("/action")
+   def action():
+       return {"result": "ok"}
+   ```
+2. Add schemas to `backend/api/schemas.py` if needed
+3. Register in `backend/api/app.py`:
+   ```python
+   from api.routes import myroute
+   app.include_router(myroute.router, prefix=prefix)
+   ```
+
+### Recipe: Modify OCR pipeline behavior
+
+1. Adjust parameters: Set env vars with `PIPELINE__` prefix (see Configuration Reference)
+2. Add a new processing stage:
+   - Create module in `backend/core/`
+   - Import and call in `backend/services/ocr_pipeline.py` → `run()` method
+   - Add corresponding settings to `OCRPipelineSettings` if configurable
+
+### Recipe: Add frontend page
+
+1. Create `frontend/src/pages/MyPage.tsx`
+2. Add route in `frontend/src/App.tsx`: `<Route path="/mypage" element={<MyPage />} />`
+3. Add nav link in `frontend/src/components/Layout.tsx`
+
+### Recipe: Change VLM model
+
+1. For vLLM: Set `VLLM_MODEL=new-model/name` in root `.env` or docker-compose
+2. For API backends: Set `VLM__GEMINI_MODEL_NAME=...` or `VLM__OPENAI_MODEL_NAME=...`
+3. Restart the relevant service
+
+### Recipe: Enable debug mode (save intermediate images)
+
+```bash
+PIPELINE__DEBUG_ENABLED=true
+PIPELINE__DEBUG_DIR=./debug/ocr_pipeline
+```
+Restart backend. Each OCR run saves images from each pipeline stage to the debug directory.
+
+### Recipe: Run backend tests (when tests are added)
+
+```bash
+cd backend
+pip install -e ".[dev]"
+pytest                    # runs tests from tests/ directory
+pytest -x --tb=short     # stop on first failure, short traceback
+```
+
+### Recipe: Local development without Docker
+
+```bash
+# Terminal 1: vLLM (optional — can use Gemini/OpenAI API instead)
+vllm serve Qwen/Qwen3-VL-2B-Instruct --port 8001
+
+# Terminal 2: Backend
+cd backend && cp .env.example .env  # edit .env
+pip install -e ".[dev]"
+uvicorn api.app:app --host 127.0.0.1 --port 8080 --reload
+
+# Terminal 3: Frontend
+cd frontend && npm install && npm run dev
+# → http://localhost:5173 (Vite proxies /api to :8080)
+```
+
+### Recipe: Build and deploy with Docker Compose
+
+```bash
+cp backend/.env.example backend/.env  # configure
+docker compose up --build -d
+# frontend: http://localhost:3000
+# backend:  http://localhost:8080
+# vllm:     http://localhost:8001
+```
