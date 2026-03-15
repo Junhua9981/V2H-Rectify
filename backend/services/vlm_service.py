@@ -77,7 +77,12 @@ class VLLMBackend(VLMBackend):
             max_tokens=max_tokens,
             temperature=temperature,
             timeout=self._timeout,
+            extra_body={
+                "top_k": 20,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }, 
         )
+        print(resp.choices[0])  # Debug: log full message object
         return resp.choices[0].message.content.strip()
 
 

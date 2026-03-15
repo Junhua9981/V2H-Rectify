@@ -35,7 +35,7 @@ class VLMSettings(BaseSettings):
     # vLLM
     vllm_base_url: str = "http://localhost:8000/v1"
     vllm_api_key: str = "EMPTY"
-    vllm_model_name: str = "Qwen/Qwen3-VL-2B-Instruct"
+    vllm_model_name: str = "Qwen/Qwen3.5-9B"
 
     # Gemini
     gemini_api_key: str = ""
@@ -68,7 +68,7 @@ class OCRPipelineSettings(BaseSettings):
     split_aspect_ratio: float = 2.0
 
     # Debug
-    debug_enabled: bool = False
+    debug_enabled: bool = True
     debug_dir: Path = Path("./debug/ocr_pipeline")
 
 

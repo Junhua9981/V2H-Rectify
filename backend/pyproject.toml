@@ -6,9 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "craft-ocr-v3"
 version = "3.0.0"
 description = "CRAFT-enhanced handwritten Chinese OCR system with Web API"
-readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
 
 dependencies = [
     # Deep learning
@@ -55,3 +54,6 @@ select = ["E", "F", "W", "I"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.setuptools]
+packages = ["api", "core", "config", "services"]
