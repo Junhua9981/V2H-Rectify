@@ -379,22 +379,8 @@ class OCRPipeline:
         return TextReformatConfig(
             spacing=self._cfg.reformat_spacing,
             binary_threshold=self._cfg.reformat_binary_threshold,
-            line_thickness_ratio=self._cfg.reformat_line_thickness_ratio,
-            line_span_ratio=self._cfg.reformat_line_span_ratio,
-            min_fill_ratio=self._cfg.reformat_min_fill_ratio,
-            min_bbox_fill_ratio=self._cfg.reformat_min_bbox_fill_ratio,
-            heat_active_threshold=self._cfg.reformat_heat_active_threshold,
-            heat_blank_mean_max=self._cfg.reformat_heat_blank_mean_max,
-            heat_blank_active_ratio_max=self._cfg.reformat_heat_blank_active_ratio_max,
-            heat_blank_peak_max=self._cfg.reformat_heat_blank_peak_max,
-            heat_line_active_ratio_max=self._cfg.reformat_heat_line_active_ratio_max,
-            heat_rescue_peak_min=self._cfg.reformat_heat_rescue_peak_min,
-            heat_rescue_active_ratio_min=self._cfg.reformat_heat_rescue_active_ratio_min,
-            outer_border_margin_ratio=self._cfg.reformat_outer_border_margin_ratio,
-            outer_border_margin_min_px=self._cfg.reformat_outer_border_margin_min_px,
-            outer_border_line_span_ratio=self._cfg.reformat_outer_border_line_span_ratio,
-            outer_border_max_fill_ratio=self._cfg.reformat_outer_border_max_fill_ratio,
-            outer_border_max_heat_active_ratio=self._cfg.reformat_outer_border_max_heat_active_ratio,
+            blank_ink_ratio=self._cfg.reformat_blank_ink_ratio,
+            heat_rescue_peak=self._cfg.reformat_heat_rescue_peak,
         )
 
     @staticmethod

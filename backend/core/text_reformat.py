@@ -17,29 +17,29 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Hardcoded constants for blank-cell detection (no need to expose as params)
+# ---------------------------------------------------------------------------
+_LINE_THICKNESS_RATIO = 0.10   # Max line thickness as fraction of cell dimension
+_LINE_SPAN_RATIO = 0.50        # Min span of ink bounding box to be classified as a line
+_HEAT_ACTIVE_THRESHOLD = 0.35  # Heatmap pixel value above which a pixel counts as "active"
+_HEAT_RESCUE_ACTIVE = 0.03     # Min active ratio inside a line-shaped cell to rescue it
+_HEAT_CENTER_MARGIN = 0.20     # Fraction trimmed from each edge before reading heatmap;
+                               # avoids picking up activation that bleeds from neighbour chars
+
 
 @dataclass(frozen=True)
 class TextReformatConfig:
-    """Tunable thresholds for conservative blank-cell detection."""
+    """Tunable thresholds for blank-cell detection.
 
-    spacing: int = 20
-    binary_threshold: int = 128
-    line_thickness_ratio: float = 0.08
-    line_span_ratio: float = 0.55
-    min_fill_ratio: float = 0.040
-    min_bbox_fill_ratio: float = 0.55
-    heat_active_threshold: float = 0.35
-    heat_blank_mean_max: float = 0.06
-    heat_blank_active_ratio_max: float = 0.015
-    heat_blank_peak_max: float = 0.28
-    heat_line_active_ratio_max: float = 0.010
-    heat_rescue_peak_min: float = 0.40
-    heat_rescue_active_ratio_min: float = 0.030
-    outer_border_margin_ratio: float = 0.015
-    outer_border_margin_min_px: int = 2
-    outer_border_line_span_ratio: float = 0.45
-    outer_border_max_fill_ratio: float = 0.10
-    outer_border_max_heat_active_ratio: float = 0.06
+    Only the parameters that meaningfully affect real-world accuracy are
+    exposed here.  Everything else is hardcoded as module-level constants.
+    """
+
+    spacing: int = 20               # Pixel gap between characters in the output strip
+    binary_threshold: int = 128     # Threshold for image → binary (ink) conversion
+    blank_ink_ratio: float = 0.04   # Fill ratio below this is considered "sparse ink"
+    heat_rescue_peak: float = 0.40  # Heatmap peak above this → definitely a character
 
 
 @dataclass
@@ -83,7 +83,7 @@ def vertical_to_horizontal(
     if not char_boxes:
         return image, []
 
-    h_img, w_img, c = image.shape
+    _h_img, _w_img, c = image.shape
     char_images: list[np.ndarray] = []
     spacing_indexes: list[int] = []
     max_char_h = 0
@@ -98,93 +98,20 @@ def vertical_to_horizontal(
 
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, cfg.binary_threshold, 255, cv2.THRESH_BINARY_INV)
-        has_heat = ink_crop is not None and ink_crop.size > 0
-        heat_mean, heat_peak, heat_active_ratio = _heat_stats(ink_crop, cfg.heat_active_threshold)
-        coords = cv2.findNonZero(binary)
-        if coords is not None:
-            rx, ry, rw, rh = cv2.boundingRect(coords)
 
-            # Conservative blank classification:
-            # only drop when line-like shape AND very low ink density.
-            thickness_px_h = max(2, int(round(bh * cfg.line_thickness_ratio)))
-            thickness_px_w = max(2, int(round(bw * cfg.line_thickness_ratio)))
-            is_horiz_line = rh <= thickness_px_h and rw >= bw * cfg.line_span_ratio
-            is_vert_line = rw <= thickness_px_w and rh >= bh * cfg.line_span_ratio
-
-            ink_pixels = int(np.count_nonzero(binary))
-            fill_ratio = ink_pixels / max(1, bw * bh)
-
-            tight_mask = binary[ry : ry + rh, rx : rx + rw]
-            bbox_fill_ratio = np.count_nonzero(tight_mask) / max(1, rw * rh)
-
-            blank_like = (
-                (is_horiz_line or is_vert_line)
-                and fill_ratio <= cfg.min_fill_ratio
-                and bbox_fill_ratio >= cfg.min_bbox_fill_ratio
-                and (
-                    not has_heat
-                    or heat_active_ratio <= cfg.heat_line_active_ratio_max
-                )
-            )
-
-            border_margin = max(
-                cfg.outer_border_margin_min_px,
-                int(round(min(h_img, w_img) * cfg.outer_border_margin_ratio)),
-            )
-            near_outer_border = (
-                x <= border_margin
-                or y <= border_margin
-                or (x + bw) >= (w_img - border_margin)
-                or (y + bh) >= (h_img - border_margin)
-            )
-            border_span_h = rh <= thickness_px_h and rw >= bw * cfg.outer_border_line_span_ratio
-            border_span_v = rw <= thickness_px_w and rh >= bh * cfg.outer_border_line_span_ratio
-            border_blank_like = (
-                near_outer_border
-                and (border_span_h or border_span_v)
-                and fill_ratio <= cfg.outer_border_max_fill_ratio
-                and (
-                    (not has_heat)
-                    or heat_active_ratio <= cfg.outer_border_max_heat_active_ratio
-                )
-            )
-            blank_like = blank_like or border_blank_like
-
-            if has_heat:
-                blank_like = blank_like or (
-                    fill_ratio <= cfg.min_fill_ratio
-                    and heat_mean <= cfg.heat_blank_mean_max
-                    and heat_active_ratio <= cfg.heat_blank_active_ratio_max
-                    and heat_peak <= cfg.heat_blank_peak_max
-                )
-
-            heat_rescue = (
-                has_heat
-                and (
-                    heat_peak >= cfg.heat_rescue_peak_min
-                    or heat_active_ratio >= cfg.heat_rescue_active_ratio_min
-                )
-            )
-            if heat_rescue:
-                blank_like = False
-
-            if blank_like:
-                spacing_indexes.append(idx)
-            else:
+        if _is_blank_cell(binary, ink_crop, bw, bh, cfg):
+            spacing_indexes.append(idx)
+        else:
+            coords = cv2.findNonZero(binary)
+            if coords is not None:
+                rx, ry, rw, rh = cv2.boundingRect(coords)
                 tight = crop[ry : ry + rh, rx : rx + rw]
                 char_images.append(tight)
                 max_char_h = max(max_char_h, tight.shape[0])
-        else:
-            # When thresholding misses faint ink, keep the cell if heatmap still
-            # indicates confident character evidence.
-            if has_heat and (
-                heat_peak >= cfg.heat_rescue_peak_min
-                or heat_active_ratio >= cfg.heat_rescue_active_ratio_min
-            ):
+            else:
+                # No binary foreground but not blank (rescued by heatmap peak).
                 char_images.append(crop)
                 max_char_h = max(max_char_h, crop.shape[0])
-            else:
-                spacing_indexes.append(idx)
 
     if not char_images:
         return image, spacing_indexes
@@ -200,6 +127,64 @@ def vertical_to_horizontal(
         cur_x += cw + cfg.spacing
 
     return result, spacing_indexes
+
+
+def _is_blank_cell(
+    binary: np.ndarray,
+    ink_crop: Optional[np.ndarray],
+    bw: int,
+    bh: int,
+    cfg: TextReformatConfig,
+) -> bool:
+    """Return True if the cell should be treated as blank (no handwritten content).
+
+    Decision tree (evaluated in priority order):
+
+    1. Strong heatmap peak  → definitely a character, stop.
+    2. No binary ink        → blank (faint chars already caught by step 1).
+    3. Line-shaped ink      → manuscript grid/border line → blank,
+                              unless heatmap active-ratio says otherwise.
+    4. Sparse ink + heatmap → noise/dirt → blank.
+    5. Meaningful ink       → not blank.
+    """
+    has_heat = ink_crop is not None and ink_crop.size > 0
+    # Use only the central region of the heatmap to avoid picking up activation
+    # that bleeds in from neighbouring character cells.
+    _, heat_peak, heat_active = _center_heat_stats(ink_crop, _HEAT_ACTIVE_THRESHOLD)
+
+    # Priority 1: strong character evidence in heatmap → keep unconditionally.
+    if has_heat and heat_peak >= cfg.heat_rescue_peak:
+        return False
+
+    fill_ratio = int(np.count_nonzero(binary)) / max(1, bw * bh)
+
+    # Priority 2: no ink at all → blank.
+    if fill_ratio == 0:
+        return True
+
+    # Priority 3: line-artifact detection (printed grid lines, border frames).
+    coords = cv2.findNonZero(binary)
+    rx, ry, rw, rh = cv2.boundingRect(coords)
+    thickness_h = max(2, int(bh * _LINE_THICKNESS_RATIO))
+    thickness_w = max(2, int(bw * _LINE_THICKNESS_RATIO))
+    is_line = (rh <= thickness_h and rw >= bw * _LINE_SPAN_RATIO) or (
+        rw <= thickness_w and rh >= bh * _LINE_SPAN_RATIO
+    )
+    if is_line:
+        # Rescue only when the heatmap is meaningfully active (e.g. character「一」).
+        # Printed grid lines produce near-zero heatmap activity.
+        if has_heat and heat_active >= _HEAT_RESCUE_ACTIVE:
+            return False
+        return True
+
+    # Priority 4: sparse ink with heatmap confirmation → noise/dirt → blank.
+    if fill_ratio <= cfg.blank_ink_ratio:
+        if has_heat:
+            return True   # weak ink AND weak heatmap → not a character
+        return False      # no heatmap: give benefit of the doubt
+
+    # Priority 5: meaningful ink → not blank.
+    return False
 
 
 def reformat_columns(
@@ -378,3 +363,21 @@ def _heat_stats(ink_crop: Optional[np.ndarray], active_threshold: float) -> Tupl
     peak_val = float(arr.max())
     active_ratio = float(np.mean(arr >= active_threshold))
     return mean_val, peak_val, active_ratio
+
+
+def _center_heat_stats(ink_crop: Optional[np.ndarray], active_threshold: float) -> Tuple[float, float, float]:
+    """Like _heat_stats but restricted to the inner region of the crop.
+
+    CRAFT heatmaps bleed activation beyond the actual character boundary.  A
+    blank cell adjacent to a character will show elevated values along its
+    edges.  By trimming _HEAT_CENTER_MARGIN from every side we read only the
+    region where a *genuine* character signal would appear, ignoring the
+    neighbour bleed-over at the periphery.
+    """
+    if ink_crop is None or ink_crop.size == 0:
+        return 0.0, 0.0, 0.0
+    h, w = ink_crop.shape[:2]
+    my = max(1, int(h * _HEAT_CENTER_MARGIN))
+    mx = max(1, int(w * _HEAT_CENTER_MARGIN))
+    center = ink_crop[my : max(my + 1, h - my), mx : max(mx + 1, w - mx)]
+    return _heat_stats(center, active_threshold)
