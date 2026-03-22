@@ -82,7 +82,7 @@ class VLLMBackend(VLMBackend):
                 "chat_template_kwargs": {"enable_thinking": False},
             }, 
         )
-        print(resp.choices[0])  # Debug: log full message object
+        # print(resp.choices[0])  # Debug: log full message object
         return resp.choices[0].message.content.strip()
 
 

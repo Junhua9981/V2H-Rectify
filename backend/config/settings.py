@@ -67,6 +67,26 @@ class OCRPipelineSettings(BaseSettings):
     # Image splitter
     split_aspect_ratio: float = 2.0
 
+    # Text reformat / blank-cell detection
+    reformat_spacing: int = Field(default=20, ge=1, le=128)
+    reformat_binary_threshold: int = Field(default=128, ge=1, le=254)
+    reformat_line_thickness_ratio: float = Field(default=0.08, gt=0.0, le=0.30)
+    reformat_line_span_ratio: float = Field(default=0.55, gt=0.0, le=1.0)
+    reformat_min_fill_ratio: float = Field(default=0.040, ge=0.0, le=1.0)
+    reformat_min_bbox_fill_ratio: float = Field(default=0.55, ge=0.0, le=1.0)
+    reformat_heat_active_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
+    reformat_heat_blank_mean_max: float = Field(default=0.06, ge=0.0, le=1.0)
+    reformat_heat_blank_active_ratio_max: float = Field(default=0.015, ge=0.0, le=1.0)
+    reformat_heat_blank_peak_max: float = Field(default=0.28, ge=0.0, le=1.0)
+    reformat_heat_line_active_ratio_max: float = Field(default=0.010, ge=0.0, le=1.0)
+    reformat_heat_rescue_peak_min: float = Field(default=0.40, ge=0.0, le=1.0)
+    reformat_heat_rescue_active_ratio_min: float = Field(default=0.030, ge=0.0, le=1.0)
+    reformat_outer_border_margin_ratio: float = Field(default=0.015, ge=0.0, le=0.2)
+    reformat_outer_border_margin_min_px: int = Field(default=2, ge=0, le=64)
+    reformat_outer_border_line_span_ratio: float = Field(default=0.45, ge=0.0, le=1.0)
+    reformat_outer_border_max_fill_ratio: float = Field(default=0.10, ge=0.0, le=1.0)
+    reformat_outer_border_max_heat_active_ratio: float = Field(default=0.06, ge=0.0, le=1.0)
+
     # Debug
     debug_enabled: bool = True
     debug_dir: Path = Path("./debug/ocr_pipeline")

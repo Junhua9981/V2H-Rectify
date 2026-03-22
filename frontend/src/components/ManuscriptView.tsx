@@ -37,9 +37,19 @@ export default function ManuscriptView({ columns, cellSize = 36 }: Props) {
 }
 
 function ColumnStrip({ col, cellSize }: { col: ColumnData; cellSize: number }) {
-  const blanks = new Set(col.spacing_indexes);
-  // Spread into array so that multi-byte / surrogate-pair chars are one unit each.
-  const chars = [...col.text];
+  // Normalise incoming indexes defensively. In some payloads values may be
+  // stringified numbers and would fail Set.has(i) without conversion.
+  const blankIndexes = (col.spacing_indexes ?? [])
+    .map((v) => Number(v))
+    .filter((v) => Number.isInteger(v) && v >= 0 && v < col.num_rows)
+    .sort((a, b) => a - b);
+  const blanks = new Set(blankIndexes);
+
+  // Manuscript mode should use grid spacing as the single source of truth.
+  // Drop OCR-emitted spaces/newlines to prevent off-by-one visual drift.
+  const compactText = (col.text ?? "").replace(/[\s\u3000]+/g, "");
+  // Spread into array so multi-byte / surrogate-pair chars remain one unit.
+  const chars = [...compactText];
   let charIdx = 0;
 
   const cells: (string | null)[] = Array.from({ length: col.num_rows }, (_, i) => {

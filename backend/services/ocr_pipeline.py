@@ -31,7 +31,13 @@ from PIL import Image
 from config.settings import OCRPipelineSettings
 from core import grid_extractor, print_removal, rotation
 from core.image_utils import bgr_to_pil, pil_to_bgr, split_if_wide, to_grayscale
-from core.text_reformat import ReformattedColumn, refine_text_raw, reformat_columns
+from core.text_reformat import (
+    ReformattedColumn,
+    TextReformatConfig,
+    apply_double_indent_heuristic,
+    refine_text_raw,
+    reformat_columns,
+)
 from services.craft_service import CRAFTService
 from services.vlm_service import SYSTEM_PROMPT_OCR, USER_PROMPT_OCR, VLMService
 
@@ -296,7 +302,12 @@ class OCRPipeline:
             {"x": b.x, "y": b.y, "w": b.w, "h": b.h, "row": b.row, "col": b.col}
             for b in grid.boxes
         ]
-        columns = reformat_columns(img_bgr, box_dicts)
+        columns = reformat_columns(
+            img_bgr,
+            box_dicts,
+            config=self._text_reformat_config(),
+            ink_map=char_mask,
+        )
 
         if not columns:
             return "", None, [], angle, print_removed, 0
@@ -313,15 +324,19 @@ class OCRPipeline:
             debug_content = (f"[title]\n{title}\n\n[body]\n{body}") if title else body
             self._save_debug_text(debug_dir / f"{prefix}_99_text.txt", debug_content)
 
-        col_data = [
-            ColumnData(
+        col_data = []
+        for r in sorted(column_results, key=lambda r: r["col_index"]):
+            text = r["text"].strip()
+            num_rows = int(r.get("num_rows", 0) or 0)
+            si = sorted({int(i) for i in r.get("spacing_indexes", []) if isinstance(i, int)})
+            si = [i for i in si if i >= 0 and (num_rows <= 0 or i < num_rows)]
+            si = apply_double_indent_heuristic(si, num_rows, len(text))
+            col_data.append(ColumnData(
                 col_index=r["col_index"],
                 text=r["text"],
-                spacing_indexes=r["spacing_indexes"],
-                num_rows=r["num_rows"],
-            )
-            for r in sorted(column_results, key=lambda r: r["col_index"])
-        ]
+                spacing_indexes=si,
+                num_rows=num_rows,
+            ))
         return body, title, col_data, angle, print_removed, len(columns)
 
     def _ocr_columns(self, columns: List[ReformattedColumn]) -> List[Dict]:
@@ -359,6 +374,28 @@ class OCRPipeline:
         out_dir = base_dir / f"{timestamp}_{suffix}"
         out_dir.mkdir(parents=True, exist_ok=True)
         return out_dir
+
+    def _text_reformat_config(self) -> TextReformatConfig:
+        return TextReformatConfig(
+            spacing=self._cfg.reformat_spacing,
+            binary_threshold=self._cfg.reformat_binary_threshold,
+            line_thickness_ratio=self._cfg.reformat_line_thickness_ratio,
+            line_span_ratio=self._cfg.reformat_line_span_ratio,
+            min_fill_ratio=self._cfg.reformat_min_fill_ratio,
+            min_bbox_fill_ratio=self._cfg.reformat_min_bbox_fill_ratio,
+            heat_active_threshold=self._cfg.reformat_heat_active_threshold,
+            heat_blank_mean_max=self._cfg.reformat_heat_blank_mean_max,
+            heat_blank_active_ratio_max=self._cfg.reformat_heat_blank_active_ratio_max,
+            heat_blank_peak_max=self._cfg.reformat_heat_blank_peak_max,
+            heat_line_active_ratio_max=self._cfg.reformat_heat_line_active_ratio_max,
+            heat_rescue_peak_min=self._cfg.reformat_heat_rescue_peak_min,
+            heat_rescue_active_ratio_min=self._cfg.reformat_heat_rescue_active_ratio_min,
+            outer_border_margin_ratio=self._cfg.reformat_outer_border_margin_ratio,
+            outer_border_margin_min_px=self._cfg.reformat_outer_border_margin_min_px,
+            outer_border_line_span_ratio=self._cfg.reformat_outer_border_line_span_ratio,
+            outer_border_max_fill_ratio=self._cfg.reformat_outer_border_max_fill_ratio,
+            outer_border_max_heat_active_ratio=self._cfg.reformat_outer_border_max_heat_active_ratio,
+        )
 
     @staticmethod
     def _sanitize_tag(raw: str) -> str:
