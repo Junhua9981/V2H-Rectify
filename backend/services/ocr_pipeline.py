@@ -22,7 +22,7 @@ import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import cv2
 import numpy as np
@@ -119,12 +119,23 @@ class OCRPipeline:
         auto_split: Optional[bool] = None,
         debug: Optional[bool] = None,
         debug_tag: Optional[str] = None,
+        on_progress: Optional[Callable[[str, float], None]] = None,
     ) -> OCRResult:
         """Execute the full OCR pipeline on *image*.
 
         Feature flags default to the values in ``OCRPipelineSettings`` but
         can be overridden per-call.
+
+        *on_progress* is an optional ``(stage, progress)`` callback invoked at
+        each pipeline stage.  ``progress`` is in ``[0, 1]``.
         """
+        def _emit(stage: str, progress: float) -> None:
+            if on_progress:
+                try:
+                    on_progress(stage, progress)
+                except Exception:
+                    pass
+
         t0 = time.time()
         do_rotate = auto_rotate if auto_rotate is not None else self._cfg.auto_rotate
         do_print = remove_print if remove_print is not None else self._cfg.remove_print
@@ -135,6 +146,8 @@ class OCRPipeline:
         img_bgr = pil_to_bgr(image)
         if debug_dir is not None:
             self._save_debug_image(debug_dir / "00_input.png", img_bgr)
+
+        _emit("圖片分析", 0.03)
 
         # Optional split
         if do_split:
@@ -147,6 +160,8 @@ class OCRPipeline:
             for i, part in enumerate(parts):
                 self._save_debug_image(debug_dir / f"01_split_part_{i:02d}.png", part)
 
+        _emit("圖片分析", 0.06)
+
         all_texts: list[str] = []
         all_titles: list[Optional[str]] = []
         all_columns: list[ColumnData] = []
@@ -154,13 +169,22 @@ class OCRPipeline:
         total_print_removed = False
         total_columns = 0
 
+        num_parts = len(parts)
         for idx, part in enumerate(reversed(parts)):
+            # Each part occupies an equal slice of [0.06, 0.95].
+            part_start = 0.06 + idx / num_parts * 0.89
+            part_end   = 0.06 + (idx + 1) / num_parts * 0.89
+
+            def _part_emit(stage: str, p: float, s: float = part_start, e: float = part_end) -> None:
+                _emit(stage, s + p * (e - s))
+
             text, part_title, part_columns, angle, pr, num_cols = self._process_single(
                 part,
                 do_rotate=do_rotate,
                 do_print_removal=(do_print and idx == 0),
                 debug_dir=debug_dir,
                 part_index=idx,
+                on_progress=_part_emit,
             )
             # Offset col_index so columns from different parts don't collide.
             # parts are processed right→left; each subsequent part's columns
@@ -182,13 +206,10 @@ class OCRPipeline:
             total_print_removed = total_print_removed or pr
             total_columns += num_cols
 
+        _emit("文字整合", 0.97)
         final_title = next((t for t in all_titles if t), None)
 
         # Normalise col_index to be globally consecutive 0, 1, 2, …
-        # Sort by the offset-adjusted col_index (relative order is already
-        # correct), then re-assign clean integers so the frontend always
-        # receives deduplicated, consecutive indices regardless of how each
-        # half's grid numbered its own columns.
         all_columns.sort(key=lambda c: c.col_index)
         all_columns = [
             ColumnData(
@@ -224,23 +245,34 @@ class OCRPipeline:
         do_print_removal: bool,
         debug_dir: Optional[Path],
         part_index: int,
+        on_progress: Optional[Callable[[str, float], None]] = None,
     ) -> tuple[str, Optional[str], List[ColumnData], float, bool, int]:
         """Process a single (possibly half) image through the pipeline.
 
         Returns ``(body, title, columns, rotation_angle, print_was_removed, num_columns)``.
         """
+        def emit(stage: str, p: float) -> None:
+            if on_progress:
+                try:
+                    on_progress(stage, p)
+                except Exception:
+                    pass
+
         prefix = f"part_{part_index:02d}"
         if debug_dir is not None:
             self._save_debug_image(debug_dir / f"{prefix}_10_input.png", img_bgr)
 
         # ---- CRAFT detection (ONE pass) ----
+        emit("CRAFT 文字偵測", 0.05)
         det_result, heatmap = self._craft.detect_with_heatmap(img_bgr, canvas_size=5120)
+        emit("CRAFT 文字偵測", 0.20)
         if debug_dir is not None:
             self._save_debug_heatmap(debug_dir / f"{prefix}_11_heatmap_initial.png", heatmap)
 
         # ---- Rotation correction ----
         angle = 0.0
         if do_rotate:
+            emit("旋轉校正", 0.22)
             img_bgr, angle = rotation.correct_skew(img_bgr, heatmap)
             if debug_dir is not None:
                 self._save_debug_image(debug_dir / f"{prefix}_20_after_rotation.png", img_bgr)
@@ -250,10 +282,12 @@ class OCRPipeline:
                 det_result, heatmap = self._craft.detect_with_heatmap(img_bgr, canvas_size=5120)
                 if debug_dir is not None:
                     self._save_debug_heatmap(debug_dir / f"{prefix}_21_heatmap_after_rotation.png", heatmap)
+            emit("旋轉校正", 0.35)
 
         # ---- Print-text removal ----
         print_removed = False
         if do_print_removal:
+            emit("印刷字去除", 0.37)
             pr_result = print_removal.detect_and_remove(
                 img_bgr, heatmap, direction="horizontal"
             )
@@ -277,8 +311,10 @@ class OCRPipeline:
                 det_result, heatmap = self._craft.detect_with_heatmap(img_bgr)
                 if debug_dir is not None:
                     self._save_debug_heatmap(debug_dir / f"{prefix}_32_heatmap_after_print_removal.png", heatmap)
+            emit("印刷字去除", 0.45)
 
         # ---- Grid extraction ----
+        emit("格線提取", 0.47)
         gray = to_grayscale(img_bgr)
         char_mask = grid_extractor.character_mask_from_heatmap(heatmap)
         if debug_dir is not None:
@@ -291,6 +327,7 @@ class OCRPipeline:
             logger.warning("Grid extraction failed — returning empty text")
             return "", None, [], angle, print_removed, 0
 
+        emit("格線提取", 0.55)
         if debug_dir is not None:
             self._save_debug_image(
                 debug_dir / f"{prefix}_42_grid_boxes.png",
@@ -298,6 +335,7 @@ class OCRPipeline:
             )
 
         # ---- Vertical → Horizontal ----
+        emit("文字格式化", 0.57)
         box_dicts = [
             {"x": b.x, "y": b.y, "w": b.w, "h": b.h, "row": b.row, "col": b.col}
             for b in grid.boxes
@@ -312,12 +350,13 @@ class OCRPipeline:
         if not columns:
             return "", None, [], angle, print_removed, 0
 
+        emit("文字格式化", 0.62)
         if debug_dir is not None:
             for i, col in enumerate(columns):
                 self._save_debug_image(debug_dir / f"{prefix}_50_column_{i:02d}.png", col.image)
 
         # ---- Concurrent VLM OCR ----
-        column_results = self._ocr_columns(columns)
+        column_results = self._ocr_columns(columns, on_progress=on_progress)
         # ---- Merge ----
         title, body = refine_text_raw(column_results)
         if debug_dir is not None:
@@ -339,9 +378,16 @@ class OCRPipeline:
             ))
         return body, title, col_data, angle, print_removed, len(columns)
 
-    def _ocr_columns(self, columns: List[ReformattedColumn]) -> List[Dict]:
+    def _ocr_columns(
+        self,
+        columns: List[ReformattedColumn],
+        *,
+        on_progress: Optional[Callable[[str, float], None]] = None,
+    ) -> List[Dict]:
         """OCR all columns concurrently via the VLM service."""
         results: list[dict | None] = [None] * len(columns)
+        total = len(columns)
+        completed = 0
 
         def _ocr_one(idx: int, col: ReformattedColumn) -> tuple[int, dict]:
             pil_img = bgr_to_pil(col.image)
@@ -363,6 +409,13 @@ class OCRPipeline:
             for fut in as_completed(futs):
                 idx, result = fut.result()
                 results[idx] = result
+                completed += 1
+                if on_progress:
+                    p = 0.63 + (completed / total) * 0.30  # 63% → 93%
+                    try:
+                        on_progress(f"AI 文字辨識 ({completed}/{total})", p)
+                    except Exception:
+                        pass
 
         return [r for r in results if r is not None]
 

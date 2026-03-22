@@ -1,6 +1,5 @@
 /**
- * ResultPage — polls OCR status + shows live progress via WebSocket.
- *
+ * ResultPage — live progress via WebSocket + side-by-side results view.
  * URL: /result?taskId=xxx
  */
 
@@ -24,15 +23,17 @@ export default function ResultPage() {
   const originalFileName = locationState?.originalFileName ?? "原始圖像";
   const [params] = useSearchParams();
   const taskId = params.get("taskId");
-  const { status, progress, stage, title, text, columns, error, elapsed } = useOCRProgress(taskId);
+  const { status, progress, stage, title, text, columns, error, elapsed } =
+    useOCRProgress(taskId);
 
   if (!taskId) {
     return (
-      <div className="mx-auto max-w-2xl py-20 text-center">
+      <div className="mx-auto max-w-2xl py-24 text-center">
+        <p className="text-4xl mb-4">📄</p>
         <p className="text-gray-500">尚未提交辨識任務</p>
         <Link
           to="/"
-          className="mt-4 inline-block text-sm text-indigo-600 transition-colors hover:text-indigo-700 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
+          className="mt-4 inline-block text-sm font-medium text-indigo-600 hover:text-indigo-700 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
         >
           返回上傳
         </Link>
@@ -44,141 +45,192 @@ export default function ResultPage() {
   const isFailed = status === "failed";
   const isDone = status === "completed";
 
-  const statusText = isDone ? "已完成" : isFailed ? "失敗" : "處理中";
+  const copyText = async () => {
+    const full = title ? `${title}\n${text}` : (text ?? "");
+    await navigator.clipboard.writeText(full);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1800);
+  };
 
   return (
-    <section className="mx-auto max-w-4xl">
-      <div className="mb-6">
-        <h2 className="text-2xl font-semibold tracking-tight text-gray-900">辨識結果</h2>
-        <p className="mt-1 text-sm text-gray-600">可即時查看進度，完成後一鍵複製文字。</p>
+    <section className="mx-auto max-w-6xl">
+      {/* ── Header row ── */}
+      <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-bold tracking-tight text-gray-900">辨識結果</h2>
+          <p className="mt-0.5 text-sm text-gray-500">可即時查看進度，完成後一鍵複製文字。</p>
+        </div>
+
+        {/* Status badge + meta */}
+        <div className="flex items-center gap-3">
+          {elapsed !== null && (
+            <span className="text-xs text-gray-400">耗時 {elapsed}s</span>
+          )}
+          <span
+            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${
+              isDone
+                ? "bg-emerald-100 text-emerald-700"
+                : isFailed
+                  ? "bg-red-100 text-red-600"
+                  : "bg-amber-100 text-amber-700"
+            }`}
+          >
+            {isProcessing && (
+              <span className="h-2 w-2 rounded-full bg-amber-400 motion-safe:animate-pulse" />
+            )}
+            {isDone ? "已完成" : isFailed ? "失敗" : "處理中"}
+          </span>
+        </div>
       </div>
 
-      {/* Task info */}
-      <div className="mb-4 flex items-center justify-between rounded-xl border border-gray-200 bg-white/90 p-4 shadow-sm">
-        <span className="font-mono text-xs text-gray-500">Task: {taskId}</span>
-        <span
-          className={`rounded-full px-2.5 py-1 text-xs font-medium ${
-            isDone
-              ? "bg-green-100 text-green-700"
-              : isFailed
-                ? "bg-red-100 text-red-700"
-                : "bg-yellow-100 text-yellow-700"
-          }`}
-        >
-          {statusText}
-        </span>
-      </div>
-
-      {/* Progress */}
+      {/* ── Progress ── */}
       {isProcessing && (
         <div className="mb-6">
           <ProgressBar progress={progress} stage={stage} />
         </div>
       )}
 
-      {/* Error */}
+      {/* ── Error ── */}
       {isFailed && error && (
-        <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700" role="alert">
-          辨識失敗：{error}
+        <div
+          className="mb-6 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700"
+          role="alert"
+        >
+          <svg className="mt-0.5 h-4 w-4 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+          </svg>
+          <div>
+            <p className="font-medium">辨識失敗</p>
+            <p className="mt-0.5 text-red-600">{error}</p>
+          </div>
         </div>
       )}
 
-      {/* Result */}
+      {/* ── Result ── */}
       {isDone && text !== null && (
-        <div className="space-y-4">
-          <div className="space-y-4">
-            <div className="rounded-xl border border-gray-200 bg-white/90 p-5 shadow-sm">
-              <h3 className="mb-2 text-sm font-medium text-gray-500">原始圖像</h3>
+        <>
+          {/* Side-by-side grid on large screens */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            {/* Left – original image */}
+            <div className="flex flex-col rounded-2xl border border-gray-200 bg-white/90 p-5 shadow-sm">
+              <h3 className="mb-3 text-xs font-semibold uppercase tracking-widest text-gray-400">
+                原始圖像
+              </h3>
               {originalImageUrl ? (
                 <img
                   src={originalImageUrl}
                   alt={originalFileName}
-                  className="max-h-[60vh] w-full rounded-lg border border-gray-100 bg-gray-50 object-contain"
+                  className="flex-1 max-h-[70vh] w-full rounded-xl border border-gray-100 bg-gray-50 object-contain"
                 />
               ) : (
-                <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-6 text-sm text-gray-500">
-                  未取得原始圖像（可能是重新整理頁面或直接開啟結果連結）
+                <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-gray-200 bg-gray-50 p-8 text-sm text-gray-400">
+                  未取得原始圖像
+                  <br />
+                  <span className="text-xs">(重新整理頁面或直接開啟結果連結)</span>
                 </div>
               )}
             </div>
 
-            <div className="rounded-xl border border-gray-200 bg-white/90 p-5 shadow-sm">
+            {/* Right – OCR text */}
+            <div className="flex flex-col rounded-2xl border border-gray-200 bg-white/90 p-5 shadow-sm">
+              {/* View mode toggle */}
               <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-sm font-medium text-gray-500">辨識文字</h3>
-                {/* View mode toggle */}
-                <div className="flex overflow-hidden rounded-lg border border-gray-200 text-xs">
-                  <button
-                    onClick={() => setViewMode("linear")}
-                    className={`px-3 py-1 transition-colors ${
-                      viewMode === "linear"
-                        ? "bg-indigo-600 text-white"
-                        : "bg-white text-gray-600 hover:bg-gray-50"
-                    }`}
-                  >
-                    橫排
-                  </button>
-                  <button
-                    onClick={() => setViewMode("manuscript")}
-                    className={`border-l border-gray-200 px-3 py-1 transition-colors ${
-                      viewMode === "manuscript"
-                        ? "bg-indigo-600 text-white"
-                        : "bg-white text-gray-600 hover:bg-gray-50"
-                    }`}
-                  >
-                    稿紙直書
-                  </button>
+                <h3 className="text-xs font-semibold uppercase tracking-widest text-gray-400">
+                  辨識文字
+                </h3>
+                <div className="flex overflow-hidden rounded-lg border border-gray-200 text-xs font-medium">
+                  {(["linear", "manuscript"] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      onClick={() => setViewMode(mode)}
+                      className={`px-3 py-1.5 transition-colors ${
+                        viewMode === mode
+                          ? "bg-indigo-600 text-white"
+                          : "bg-white text-gray-600 hover:bg-gray-50"
+                      } ${mode === "manuscript" ? "border-l border-gray-200" : ""}`}
+                    >
+                      {mode === "linear" ? "橫排" : "稿紙直書"}
+                    </button>
+                  ))}
                 </div>
               </div>
 
-              {viewMode === "linear" ? (
-                <>
-                  {title && (
-                    <>
-                      <p className="py-3 text-center text-lg font-semibold tracking-widest text-gray-900">
+              {/* Content */}
+              <div className="flex-1 overflow-auto">
+                {viewMode === "linear" ? (
+                  <>
+                    {title && (
+                      <p className="mb-3 text-center text-lg font-bold tracking-widest text-gray-900 border-b border-gray-100 pb-3">
                         {title}
                       </p>
-                      <hr className="my-3 border-gray-200" />
-                    </>
-                  )}
-                  <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-gray-50 p-4 font-sans text-base leading-relaxed text-gray-800">
-                    {text}
-                  </pre>
-                </>
-              ) : (
-                <ManuscriptView columns={columns} />
-              )}
+                    )}
+                    <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-gray-50 p-4 font-sans text-base leading-loose text-gray-800">
+                      {text}
+                    </pre>
+                  </>
+                ) : (
+                  <ManuscriptView columns={columns} />
+                )}
+              </div>
             </div>
           </div>
 
-          {/* Meta */}
-          <div className="flex gap-6 text-xs text-gray-500">
-            {elapsed !== null && <span>耗時 {elapsed}s</span>}
-          </div>
+          {/* ── Action row ── */}
+          <div className="mt-5 flex items-center justify-between">
+            <Link
+              to="/"
+              className="text-sm text-gray-500 hover:text-indigo-600 transition-colors focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
+            >
+              ← 上傳新圖片
+            </Link>
 
-          {/* Copy button */}
-          <button
-            onClick={async () => {
-              const full = title ? `${title}\n${text}` : (text ?? "");
-              await navigator.clipboard.writeText(full);
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1500);
-            }}
-            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
-          >
-            {copied ? "已複製" : "複製文字"}
-          </button>
+            <button
+              onClick={copyText}
+              className={`inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
+                copied
+                  ? "bg-emerald-500 scale-95"
+                  : "bg-indigo-600 hover:bg-indigo-700 active:scale-95"
+              }`}
+            >
+              {copied ? (
+                <>
+                  <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                  </svg>
+                  已複製！
+                </>
+              ) : (
+                <>
+                  <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
+                    <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z" />
+                  </svg>
+                  複製文字
+                </>
+              )}
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ── Processing placeholder ── */}
+      {isProcessing && (
+        <div className="mt-4 rounded-2xl border border-gray-200 bg-white/60 p-10 text-center text-sm text-gray-400">
+          辨識完成後結果將顯示於此
         </div>
       )}
 
-      {/* Back */}
-      <div className="mt-8">
-        <Link
-          to="/"
-          className="text-sm text-indigo-600 transition-colors hover:text-indigo-700 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
-        >
-          ← 上傳新圖片
-        </Link>
-      </div>
+      {/* Back link when not done */}
+      {!isDone && (
+        <div className="mt-6">
+          <Link
+            to="/"
+            className="text-sm text-gray-500 hover:text-indigo-600 transition-colors focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
+          >
+            ← 上傳新圖片
+          </Link>
+        </div>
+      )}
     </section>
   );
 }

@@ -67,4 +67,5 @@ export interface WSProgressMessage {
   stage: string;
   progress: number;
   message: string;
+  status: "processing" | "completed" | "failed";
 }

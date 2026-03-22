@@ -14,6 +14,7 @@ import numpy as np
 
 from api.deps import get_pipeline
 from api.schemas import OCROptions, OCRStatusResponse, OCRSubmitResponse, TaskStatus, ColumnData
+from api.ws import broadcast_progress
 from core.image_utils import pil_to_bgr
 from services.ocr_pipeline import OCRPipeline, OCRResult
 
@@ -62,8 +63,10 @@ async def upload(
 
     _tasks[task_id] = _task_entry(TaskStatus.processing)
 
+    loop = asyncio.get_running_loop()
+
     # Run OCR in a background thread so we don't block the event loop
-    asyncio.get_event_loop().run_in_executor(
+    loop.run_in_executor(
         None,
         _run_ocr,
         task_id,
@@ -74,6 +77,7 @@ async def upload(
             remove_print=remove_print,
             auto_split=auto_split,
         ),
+        loop,
     )
 
     return OCRSubmitResponse(task_id=task_id, status=TaskStatus.processing)
@@ -84,8 +88,17 @@ def _run_ocr(
     img_bgr: np.ndarray,
     pipeline: OCRPipeline,
     opts: OCROptions,
+    loop: asyncio.AbstractEventLoop,
 ) -> None:
     """Blocking OCR execution — called from executor."""
+
+    def _on_progress(stage: str, progress: float) -> None:
+        _tasks[task_id]["progress"] = progress
+        asyncio.run_coroutine_threadsafe(
+            broadcast_progress(task_id, stage, progress),
+            loop,
+        )
+
     try:
         pil_img = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
         result = pipeline.run(
@@ -93,14 +106,23 @@ def _run_ocr(
             auto_rotate=opts.auto_rotate,
             remove_print=opts.remove_print,
             auto_split=opts.auto_split,
+            on_progress=_on_progress,
         )
         _tasks[task_id]["status"] = TaskStatus.completed
         _tasks[task_id]["progress"] = 1.0
         _tasks[task_id]["result"] = result
+        asyncio.run_coroutine_threadsafe(
+            broadcast_progress(task_id, "完成", 1.0, status="completed"),
+            loop,
+        )
     except Exception as e:
         logger.exception("OCR failed for task %s", task_id)
         _tasks[task_id]["status"] = TaskStatus.failed
         _tasks[task_id]["error"] = str(e)
+        asyncio.run_coroutine_threadsafe(
+            broadcast_progress(task_id, "失敗", 0.0, status="failed"),
+            loop,
+        )
 
 
 @router.get("/{task_id}", response_model=OCRStatusResponse)

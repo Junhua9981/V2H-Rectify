@@ -19,7 +19,13 @@ router = APIRouter(tags=["websocket"])
 _connections: Dict[str, Set[WebSocket]] = {}
 
 
-async def broadcast_progress(task_id: str, stage: str, progress: float, message: str = "") -> None:
+async def broadcast_progress(
+    task_id: str,
+    stage: str,
+    progress: float,
+    message: str = "",
+    status: str = "processing",
+) -> None:
     """Send a progress update to all WebSocket clients watching *task_id*."""
     sockets = _connections.get(task_id, set())
     if not sockets:
@@ -30,6 +36,7 @@ async def broadcast_progress(task_id: str, stage: str, progress: float, message:
         stage=stage,
         progress=progress,
         message=message,
+        status=status,
     ).model_dump_json()
 
     dead: list[WebSocket] = []
