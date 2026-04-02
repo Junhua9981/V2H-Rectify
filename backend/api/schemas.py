@@ -102,3 +102,4 @@ class WSProgressMessage(BaseModel):
     stage: str = ""
     progress: float = 0.0
     message: str = ""
+    status: str = "processing"  # "processing" | "completed" | "failed"

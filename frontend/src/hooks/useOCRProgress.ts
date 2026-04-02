@@ -1,4 +1,4 @@
-/** useOCRProgress — polls status + listens to WebSocket progress. */
+/** useOCRProgress — WebSocket for live progress + polling fallback. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { connectProgressWS, pollOCRStatus } from "../lib/api";
@@ -30,6 +30,7 @@ export function useOCRProgress(taskId: string | null) {
   const [state, setState] = useState<ProgressState>(INITIAL);
   const wsRef = useRef<WebSocket | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const doneRef = useRef(false);
 
   const cleanup = useCallback(() => {
     wsRef.current?.close();
@@ -38,31 +39,12 @@ export function useOCRProgress(taskId: string | null) {
     pollRef.current = null;
   }, []);
 
-  useEffect(() => {
-    if (!taskId) {
-      const timer = window.setTimeout(() => {
-        setState(INITIAL);
-      }, 0);
-      return () => {
-        window.clearTimeout(timer);
-      };
-    }
-
-    // WebSocket for real-time progress
-    const ws = connectProgressWS(taskId);
-    wsRef.current = ws;
-
-    ws.onmessage = (ev) => {
-      try {
-        const msg: WSProgressMessage = JSON.parse(ev.data);
-        setState((s) => ({ ...s, stage: msg.stage, progress: msg.progress }));
-      } catch {
-        // ignore malformed messages
-      }
-    };
-
-    // Polling fallback (every 2s)
-    pollRef.current = setInterval(async () => {
+  /** Fetch final status once and update state, then stop everything. */
+  const finalPoll = useCallback(
+    async (taskId: string) => {
+      if (doneRef.current) return;
+      doneRef.current = true;
+      cleanup();
       try {
         const res = await pollOCRStatus(taskId);
         setState((s) => ({
@@ -75,16 +57,66 @@ export function useOCRProgress(taskId: string | null) {
           elapsed: res.elapsed_seconds,
           progress: res.progress,
         }));
+      } catch {
+        // ignore — polling will still catch it on next tick if WS fired too early
+      }
+    },
+    [cleanup],
+  );
+
+  useEffect(() => {
+    if (!taskId) {
+      const timer = window.setTimeout(() => setState(INITIAL), 0);
+      return () => window.clearTimeout(timer);
+    }
+
+    doneRef.current = false;
+
+    // WebSocket — primary channel for live progress
+    const ws = connectProgressWS(taskId);
+    wsRef.current = ws;
+
+    ws.onmessage = (ev) => {
+      try {
+        const msg: WSProgressMessage = JSON.parse(ev.data);
+        setState((s) => ({ ...s, stage: msg.stage, progress: msg.progress }));
+
+        if (msg.status === "completed" || msg.status === "failed") {
+          // Backend signals done → fetch full result immediately, no need to wait for poll.
+          finalPoll(taskId);
+        }
+      } catch {
+        // ignore malformed messages
+      }
+    };
+
+    // Polling fallback — catches cases where WS never arrives (proxy issues, etc.)
+    pollRef.current = setInterval(async () => {
+      if (doneRef.current) return;
+      try {
+        const res = await pollOCRStatus(taskId);
+        setState((s) => ({
+          ...s,
+          status: res.status,
+          title: res.title,
+          text: res.text,
+          columns: res.columns ?? [],
+          error: res.error,
+          elapsed: res.elapsed_seconds,
+          // Only overwrite progress from poll if WS hasn't given us a higher value.
+          progress: Math.max(s.progress, res.progress),
+        }));
         if (res.status === "completed" || res.status === "failed") {
+          doneRef.current = true;
           cleanup();
         }
       } catch {
         // ignore transient errors
       }
-    }, 2000);
+    }, 3000);
 
     return cleanup;
-  }, [taskId, cleanup]);
+  }, [taskId, cleanup, finalPoll]);
 
   return state;
 }
