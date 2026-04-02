@@ -8,6 +8,7 @@ import { useState } from "react";
 import { useOCRProgress } from "../hooks/useOCRProgress";
 import ProgressBar from "../components/ProgressBar";
 import ManuscriptView from "../components/ManuscriptView";
+import ZoomableImage from "../components/ZoomableImage";
 
 interface ResultLocationState {
   originalImageUrl?: string;
@@ -109,18 +110,18 @@ export default function ResultPage() {
       {/* ── Result ── */}
       {isDone && text !== null && (
         <>
-          {/* Side-by-side grid on large screens */}
-          <div className="grid gap-4 lg:grid-cols-2">
+          {/* Top-bottom layout */}
+          <div className="flex flex-col gap-4">
             {/* Left – original image */}
             <div className="flex flex-col rounded-2xl border border-gray-200 bg-white/90 p-5 shadow-sm">
               <h3 className="mb-3 text-xs font-semibold uppercase tracking-widest text-gray-400">
                 原始圖像
               </h3>
               {originalImageUrl ? (
-                <img
+                <ZoomableImage
                   src={originalImageUrl}
                   alt={originalFileName}
-                  className="flex-1 max-h-[70vh] w-full rounded-xl border border-gray-100 bg-gray-50 object-contain"
+                  className="h-[80vh] w-full"
                 />
               ) : (
                 <div className="flex flex-1 items-center justify-center rounded-xl border border-dashed border-gray-200 bg-gray-50 p-8 text-sm text-gray-400">

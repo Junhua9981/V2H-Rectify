@@ -12,5 +12,10 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+    watch: {
+      // Use polling instead of inotify to avoid ENOSPC in container environments
+      usePolling: true,
+      interval: 300,
+    },
   },
 })

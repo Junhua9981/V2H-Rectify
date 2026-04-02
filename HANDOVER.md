@@ -1,6 +1,6 @@
 # V2H-Rectify 交接文件
 
-> 最後更新：2026-03-09
+> 最後更新：2026-03-22
 
 ---
 
@@ -61,8 +61,8 @@ POST /corner/correct →  透視校正 → 儲存已校正圖片
   ▼
 POST /ocr/upload     →  啟動 OCR 任務（背景執行）→ 回傳 task_id
   │
-  ├── WS /ws/{task_id}       → 即時進度推送（stage, progress）
-  └── GET /ocr/{task_id}     → 輪詢結果（每 2 秒）
+  ├── WS /ws/{task_id}       → 即時進度推送（stage, progress, status）
+  └── GET /ocr/{task_id}     → 輪詢結果（每 2 秒，WS 完成時立即觸發）
   │
   ▼
 回傳：{ title, text, columns[], rotation_angle, elapsed_seconds }
@@ -80,7 +80,7 @@ backend/
 │   ├── app.py              # 應用工廠 + lifespan 管理
 │   ├── deps.py             # 依賴注入（singleton services）
 │   ├── schemas.py          # Pydantic 請求/回應模型
-│   ├── ws.py               # WebSocket 進度廣播
+│   ├── ws.py               # WebSocket 進度廣播（現已主動使用）
 │   └── routes/
 │       ├── corner.py       # 角點偵測 + 透視校正路由
 │       ├── ocr.py          # OCR 提交 + 狀態輪詢路由
@@ -94,12 +94,13 @@ backend/
 │   ├── perspective.py      # 角點偵測 + 透視變換
 │   ├── print_removal.py    # 印刷/手寫分類 + 移除
 │   ├── rotation.py         # 多方法傾斜校正
-│   └── text_reformat.py    # 直排→橫排轉換 + 標題偵測
+│   └── text_reformat.py    # 直排→橫排轉換 + 空白格偵測（已簡化）
 ├── services/               # 業務服務層
 │   ├── craft_service.py    # CRAFT 批次推論服務
 │   ├── vlm_service.py      # VLM 多後端策略服務
-│   └── ocr_pipeline.py     # OCR 全流程編排器
-├── scripts/                # （空目錄，保留用）
+│   └── ocr_pipeline.py     # OCR 全流程編排器（含進度回調）
+├── tests/
+│   └── test_text_reformat.py   # text_reformat 單元測試（9 個）
 ├── pyproject.toml          # Python 依賴 + 工具設定
 ├── Dockerfile              # Python 3.11 + OpenCV 系統依賴
 └── .env.example            # 環境變數模板
@@ -147,21 +148,26 @@ backend/
 - **建構**：`VLMService.from_settings(vlm_settings)` 工廠方法
 - **後端切換**：`VLM_BACKEND` 環境變數（`vllm` / `gemini` / `openai`）
 - **關鍵方法**：`recognize(image_b64, prompt) → str`
-- **API 呼叫格式**：所有後端統一透過 OpenAI Chat Completions 格式（vLLM 原生支援，Gemini/OpenAI 各有 adapter）
+- **API 呼叫格式**：所有後端統一透過 OpenAI Chat Completions 格式
 
 #### OCRPipeline (`services/ocr_pipeline.py`)
 
 - **用途**：端到端 OCR 編排器
-- **`run()` 方法流程**（~380 行）：
-  1. **圖片分割**：若寬高比 > 2.0 → 分左右兩半
-  2. **CRAFT 偵測**：單次偵測所有文字區塊
-  3. **傾斜校正**：質心群聚 + 角度估計（`rotation.py`）
-  4. **印刷移除**：加權質心分類（`print_removal.py`）
-  5. **格線提取**：投影法行列偵測（`grid_extractor.py`）
-  6. **直排→橫排**：每列裁切為橫向圖片條（`text_reformat.py`）
-  7. **VLM 辨識**：`ThreadPoolExecutor(max_workers=4)` 並行辨識所有列
-  8. **文字精修**：標題偵測、標點正規化
-- **回傳**：`OCRResult(title, text, columns, rotation_angle, elapsed_seconds)`
+- **`run()` 方法簽章**：`run(pil_img, auto_rotate, remove_print, auto_split, on_progress=None)`
+  - `on_progress`: `Callable[[str, float], None]` — 各階段回調，參數為 `(stage_name, progress_0_to_1)`
+- **Pipeline 階段與進度廣播**：
+
+  | 階段 | 進度值 | stage 名稱 |
+  |---|---|---|
+  | CRAFT 文字偵測 | 0.10 | `"偵測文字區塊"` |
+  | 傾斜校正 | 0.25 | `"校正傾斜"` |
+  | 印刷移除 | 0.40 | `"移除印刷文字"` |
+  | 格線提取 | 0.55 | `"提取格線結構"` |
+  | 直排→橫排 | 0.65 | `"重新格式化版面"` |
+  | VLM 辨識（每列） | 0.65–0.95 | `"辨識第 N 欄"` |
+  | 完成 | 1.00 | `"完成"` |
+
+- **進度橋接**：`ocr.py` 使用 `asyncio.get_event_loop().run_coroutine_threadsafe()` 從 executor 線程安全地呼叫 async `broadcast_progress()`
 
 ### 3.4 Core 層（影像處理模組）
 
@@ -170,10 +176,34 @@ backend/
 | `perspective.py` | 角點偵測 + 透視變換 | `Corners` dataclass, `detect_corners(img)`, `warp_perspective(img, corners)` |
 | `craft_detector.py` | CRAFT 偵測結果封裝 | `CRAFTResult` (immutable dataclass), `run_craft(model, image)` |
 | `grid_extractor.py` | 投影法格線發現 | `extract_grid(boxes, img_shape) → GridResult` |
-| `rotation.py` | 多方法傾斜矯正 | `estimate_angle(boxes)`, `correct_rotation(img, boxes)` — 使用 minAreaRect + PCA + 線性回歸 |
+| `rotation.py` | 多方法傾斜矯正 | `estimate_angle(boxes)`, `correct_rotation(img, boxes)` |
 | `print_removal.py` | 印刷文字分類移除 | `classify_print_handwritten(boxes)`, `remove_print_region(img, boxes)` |
-| `text_reformat.py` | 直→橫轉換 + 標題 | `reformat_columns(img, grid)`, `detect_title(columns)` |
+| `text_reformat.py` | 直→橫轉換 + 空白格偵測 | `reformat_columns()`, `_is_blank_cell()`, `refine_text_raw()` |
 | `image_utils.py` | 格式轉換 + 分割 | `pil_to_bgr()`, `bgr_to_pil()`, `split_wide_image()` |
+
+#### text_reformat.py 空白格偵測設計
+
+`TextReformatConfig` 已從 18 個參數精簡為 4 個：
+
+```python
+@dataclass(frozen=True)
+class TextReformatConfig:
+    spacing: int = 20               # 輸出圖片字符間距（像素）
+    binary_threshold: int = 128     # 二值化閾值
+    blank_ink_ratio: float = 0.04   # 填充率低於此值視為稀疏墨水
+    heat_rescue_peak: float = 0.40  # 熱圖峰值高於此值→確定是字符
+```
+
+其餘閾值為硬編碼模組常數（`_LINE_THICKNESS_RATIO`、`_LINE_SPAN_RATIO` 等）。
+
+`_is_blank_cell()` 採用優先級決策樹：
+1. 熱圖峰值 ≥ 0.40 → 確定是字符（最高優先，不再做其他判斷）
+2. 填充率 = 0 → 空白
+3. 線條形狀（細長橫/縱線）→ 若熱圖 active_ratio ≥ 0.03 才保留（防止誤刪「一」字），否則為格線空白
+4. 稀疏墨水（fill ≤ 0.04）→ 有熱圖但無信號為雜訊（空白）；無熱圖則保留
+5. 有意義墨水 → 非空白
+
+**設計重點**：線條檢測的 rescue 邏輯獨立於全局 rescue，印刷格線（heat_active < 3%）不會被誤救回。
 
 ### 3.5 設定系統
 
@@ -188,7 +218,7 @@ Settings                    # 根設定
 ├── cuda_device: str        # GPU 設備（預設 "cuda:7"，部署時覆蓋為 "cuda:0"）
 ├── craft: CRAFTSettings    # CRAFT 模型參數
 ├── vlm: VLMSettings        # VLM 後端選項
-├── pipeline: OCRPipelineSettings  # OCR 流程參數 + feature flags
+├── pipeline: OCRPipelineSettings  # OCR 流程參數（含 4 個 reformat_* 欄位）
 ├── server: ServerSettings  # Web 服務器設定
 ├── log_level / log_format  # 日誌設定
 ```
@@ -205,21 +235,22 @@ Settings                    # 根設定
 frontend/src/
 ├── App.tsx                 # 根組件 + 路由定義
 ├── main.tsx                # React DOM 入口
-├── index.css               # 全域樣式（Tailwind）
+├── index.css               # 全域樣式（Tailwind + 漸層背景）
 ├── components/
 │   ├── Layout.tsx          # 全局佈局：導航列 + 主內容區
 │   ├── ImageDropzone.tsx   # 拖放上傳組件
 │   ├── CornerEditor.tsx    # Konva Canvas 角點編輯器（含放大鏡）
 │   ├── ManuscriptView.tsx  # RTL 稿紙網格渲染器
-│   └── ProgressBar.tsx     # 進度條（ARIA 無障礙）
+│   ├── ProgressBar.tsx     # 進度條（shimmer 動畫 + stage 標籤）
+│   └── ZoomableImage.tsx   # 可縮放/拖曳圖片檢視器
 ├── hooks/
 │   └── useOCRProgress.ts   # WebSocket + 輪詢狀態管理 Hook
 ├── lib/
 │   ├── api.ts              # REST/WS API 客戶端
 │   └── types.ts            # TypeScript 型別（映射 backend schemas）
 └── pages/
-    ├── UploadPage.tsx      # 上傳 → 角點 → 提交流程
-    └── ResultPage.tsx      # OCR 結果展示 + 即時進度
+    ├── UploadPage.tsx      # 上傳 → 角點 → 提交流程（帶連接線步驟指示器）
+    └── ResultPage.tsx      # OCR 結果展示 + 即時進度（左右分欄）
 ```
 
 ### 4.2 路由
@@ -231,9 +262,12 @@ frontend/src/
 
 ### 4.3 頁面流程
 
-#### UploadPage 三步驟
+#### UploadPage 三步驟（帶連接線步驟指示器）
 
 ```
+Step 1: upload  ──── Step 2: corner  ──── Step 3: submitting
+  ✓ 完成步驟顯示打勾圖示，連接線隨進度著色
+
 Step 1: upload
 └─ ImageDropzone 拖放或點擊選檔 → POST /corner/detect → 取得角點 + task_id
 
@@ -249,11 +283,22 @@ Step 3: submitting
 #### ResultPage
 
 - `useOCRProgress(taskId)` 同時開啟 WebSocket（即時進度）+ REST 輪詢（2s 間隔）
-- 狀態轉移：`pending → processing → completed / failed`
+- **WebSocket 收到 `completed` / `failed` 時立即觸發最終一次 poll**，無需等待下一個輪詢週期
+- 左欄：`ZoomableImage`（原始圖像，支援縮放拖曳）；右欄：辨識文字
 - 完成後顯示：標題 + 文字（線性視圖）或 ManuscriptView（稿紙視圖）
-- 「複製文字」按鈕：標題 + 本文一鍵複製到剪貼簿
+- 「複製文字」按鈕：標題 + 本文一鍵複製到剪貼簿，有動畫反饋
 
 ### 4.4 關鍵組件
+
+#### ZoomableImage（新增）
+
+- **用途**：結果頁面原始圖像的互動式瀏覽器
+- **功能**：
+  - 滾輪縮放（以游標位置為中心，0.25×～10×）
+  - 滑鼠拖曳 / 單指觸控平移
+  - 右下角縮放按鈕（+/−/↺重置）與比例顯示
+  - 拖曳邊界 clamp：確保圖片永遠至少有 60px 與容器重疊，不會完全消失
+  - `wheel` 事件以 `{ passive: false }` 原生掛載，防止縮放時觸發頁面滾動
 
 #### CornerEditor
 
@@ -269,6 +314,11 @@ Step 3: submitting
 - 使用 `dir="rtl"` 實現由右至左欄位排列
 - 每格 36px，支援 spacing_indexes 標記間距
 - 欄位 0 = 最右欄（第一寫欄）
+
+#### ProgressBar
+
+- 0% 時顯示 shimmer 掃光動畫 + spinner stage 標籤
+- 有進度時顯示 indigo → blue 漸層填充條
 
 ### 4.5 狀態管理
 
@@ -311,6 +361,8 @@ cd frontend
 npm install
 npm run dev    # Vite 開發伺服器 http://localhost:5173，/api 代理到 8080
 ```
+
+> **注意**：`vite.config.ts` 啟用了 `server.watch.usePolling: true`（300ms 間隔），用於解決容器環境的 `ENOSPC: inotify watch limit reached` 問題。
 
 ### 5.2 Docker Compose
 
@@ -366,6 +418,10 @@ docker compose down                 # 停止（保留模型快取）
 | `PIPELINE__TIMEOUT` | `120` | 單次 OCR 超時（秒） |
 | `PIPELINE__DEBUG_ENABLED` | `false` | 儲存中間處理圖片 |
 | `PIPELINE__DEBUG_DIR` | `./debug/ocr_pipeline` | Debug 圖片目錄 |
+| `PIPELINE__REFORMAT_SPACING` | `20` | 輸出圖片字符間距（像素） |
+| `PIPELINE__REFORMAT_BINARY_THRESHOLD` | `128` | 空白格二值化閾值 |
+| `PIPELINE__REFORMAT_BLANK_INK_RATIO` | `0.04` | 稀疏墨水判定閾值 |
+| `PIPELINE__REFORMAT_HEAT_RESCUE_PEAK` | `0.40` | 熱圖峰值確認字符閾值 |
 
 #### Docker Compose 專用
 
@@ -380,15 +436,14 @@ docker compose down                 # 停止（保留模型快取）
 
 | # | 類別 | 說明 | 影響程度 |
 |---|---|---|---|
-| 1 | **進度回報** | 後端 OCR pipeline 不分段回傳進度，前端 WebSocket 進度條實際無作用，僅靠 REST polling 取最終結果 | 中 |
-| 2 | **任務佇列** | 原計畫使用 Redis + MQTT 進行任務排程推送，目前使用 in-memory dict + asyncio executor。重啟遺失所有任務 | 中 |
+| 1 | ~~**進度回報**~~ | ✅ **已修復**：pipeline 各階段呼叫 `on_progress` callback → `broadcast_progress()`，WebSocket 進度條正常運作 | — |
+| 2 | **任務佇列** | 原計畫使用 Redis + MQTT，目前使用 in-memory dict + asyncio executor。重啟遺失所有任務 | 中 |
 | 3 | **角點暫存** | `corner.py` 的 `_pending_images` 為 in-memory dict，大量上傳會佔用記憶體，且重啟遺失 | 低 |
-| 4 | **前端 UI** | 介面簡陋，缺乏 loading skeleton、錯誤提示優化、mobile 適配細節 | 低 |
+| 4 | **空白格熱圖鄰居干擾** | CRAFT heatmap 從鄰近字符擴散到空白格邊緣，可能輕微影響空白格偵測準確度（已分析，尚未套用中心裁切修復） | 低 |
 | 5 | **Docker 未驗證** | `docker-compose.yml` 撰寫完成但未在乾淨環境驗證完整啟動流程 | 中 |
-| 6 | **無測試** | 沒有 unit test 或 integration test，僅有 dev 依賴配置（pytest/httpx） | 高 |
-| 7 | **無 CI/CD** | 沒有 GitHub Actions 或任何自動化 pipeline | 中 |
-| 8 | **CORS 全開** | `allow_origins=["*"]`，生產環境應限縮 | 低 |
-| 9 | **GPU 記憶體** | vLLM + CRAFT 同機部署需足夠 VRAM（建議 ≥ 16 GB） | — |
+| 6 | **無 CI/CD** | 沒有 GitHub Actions 或任何自動化 pipeline | 中 |
+| 7 | **CORS 全開** | `allow_origins=["*"]`，生產環境應限縮 | 低 |
+| 8 | **GPU 記憶體** | vLLM + CRAFT 同機部署需足夠 VRAM（建議 ≥ 16 GB） | — |
 
 ---
 
@@ -398,22 +453,20 @@ docker compose down                 # 停止（保留模型快取）
 
 ### 高優先
 
-1. **補充測試** — 至少為 `core/` 各模組寫 unit test，為 API routes 寫 integration test（已有 pytest + httpx 依賴）
-2. **實作分段進度** — 在 `OCRPipeline.run()` 的各階段呼叫 `broadcast_progress()`，讓 WebSocket 進度條真正有用
-3. **任務持久化** — 將 `_tasks` 與 `_pending_images` 遷移至 Redis，解決重啟遺失問題
+1. **任務持久化** — 將 `_tasks` 與 `_pending_images` 遷移至 Redis，解決重啟遺失問題
+2. **Docker 驗證** — 在乾淨機器執行 `docker compose up --build`，修正可能的映像問題
 
 ### 中優先
 
-4. **Docker 驗證** — 在乾淨機器執行 `docker compose up --build`，修正可能的映像問題
-5. **CI/CD** — 加入 GitHub Actions：lint (ruff) → test (pytest) → build (docker)
-6. **CORS 收窄** — 改為環境變數配置允許的 origins
-7. **前端改善** — 加入 loading skeleton、error boundary、toast 通知
+3. **空白格熱圖修復** — 在 `_is_blank_cell()` 中改用格子中心 60% 區域做 heatmap 分析，避免鄰居字符 bleed-over 的影響
+4. **CI/CD** — 加入 GitHub Actions：lint (ruff) → test (pytest) → build (docker)
+5. **CORS 收窄** — 改為環境變數配置允許的 origins
 
 ### 低優先
 
-8. **多使用者支援** — 當前為單機 in-memory，如需多人同時使用需加入 session / auth
-9. **模型熱替換** — 支援運行時切換 VLM 模型而不重啟
-10. **批次處理** — 支援多張圖片批次 OCR
+6. **多使用者支援** — 當前為單機 in-memory，如需多人同時使用需加入 session / auth
+7. **模型熱替換** — 支援運行時切換 VLM 模型而不重啟
+8. **批次處理** — 支援多張圖片批次 OCR
 
 ---
 
@@ -470,7 +523,17 @@ CUDA_DEVICE=cuda:1   # 後端使用第 2 張 GPU
 
 ---
 
-## 9. 聯絡與參考
+## 9. 分支記錄
+
+| 分支 | 狀態 | 說明 |
+|---|---|---|
+| `main` | 穩定基線 | — |
+| `feat/websocket-progress` | 已推送 | WebSocket 進度廣播、text_reformat 精簡、前端現代化 |
+| `feat/zoomable-image` | 已推送（當前） | ZoomableImage 元件、vite polling 模式 |
+
+---
+
+## 10. 聯絡與參考
 
 - **原始開發者**：使用 `git log` 查看 commit 歷史
 - **外部依賴文件**：
