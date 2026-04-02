@@ -4,6 +4,7 @@
 
 一個完整的 OCR 處理流程，用於從掃描文件中偵測、校正並轉錄繁體中文手寫文字。
 系統使用 CRAFT 進行文字偵測，並使用可配置的 VLM 後端（vLLM / Gemini / OpenAI）進行文字辨識。
+目前同時支援**單張 OCR**與**批量 OCR**流程。
 
 ---
 
@@ -13,6 +14,7 @@
 - **影像前處理**：傾斜校正、印刷文字移除
 - **直排辨識**：CRAFT 偵測手寫文字後，切分欄位交由 VLM 逐欄辨識
 - **即時進度**：WebSocket 推送各處理階段進度，前端進度條即時更新
+- **批量處理**：最多 50 張一次上傳，支援逐張角點覆寫、整批進度追蹤與結果匯出
 - **互動結果頁**：原始圖像支援縮放（0.25×–10×）/ 拖曳瀏覽，辨識文字可切換橫排或稿紙直書視圖
 
 ---
@@ -21,8 +23,10 @@
 
 ```
 V2H-Rectify/
-├── backend/      # Python FastAPI 服務（CRAFT 偵測器 + OCR 處理流程）
-└── frontend/     # React + Vite 單頁應用（圖片上傳、標註、結果顯示）
+├── backend/      # Python FastAPI 服務（單張/批量 OCR API + pipeline）
+├── frontend/     # React + Vite 單頁應用（上傳、角點編輯、結果與批量流程）
+├── HANDOVER.md   # 交接文件（維護導向）
+└── LLM.txt       # 給 Coding Agent 的結構化參考
 ```
 
 ---
@@ -41,10 +45,10 @@ uvicorn api.app:app --host 127.0.0.1 --port 8080 --reload
 ```
 
 <details>
-  <summary>可參考的 vLLM 部署方法</summary>
+  <summary>可參考的 vLLM 部署方法（示例）</summary>
 
   ```bash
-  vllm serve Qwen/Qwen3-VL-2B-Instruct --port 8001 --tensor-parallel-size 1 --max-model-len 4096
+  vllm serve Qwen/Qwen3.5-9B --port 8001 --tensor-parallel-size 1 --max-model-len 4096
   ```
 </details>
 
@@ -93,7 +97,7 @@ docker compose down
 
 | 變數 | 預設值 | 說明 |
 |---|---|---|
-| `VLLM_MODEL` | `Qwen/Qwen3-VL-2B-Instruct` | vLLM 載入的模型 |
+| `VLLM_MODEL` | `Qwen/Qwen3.5-9B` | vLLM 載入的模型（示例） |
 | `CUDA_DEVICE` | `cuda:0` | backend 推論裝置 |
 | `HUGGING_FACE_HUB_TOKEN` | （空） | 下載需授權 HF 模型時填入 |
 
@@ -115,12 +119,54 @@ docker compose down
 
 ---
 
+## 前端路由
+
+| 路徑 | 頁面 | 說明 |
+|---|---|---|
+| `/` | UploadPage | 單張上傳與角點校正 |
+| `/result` | ResultPage | 單張進度與結果檢視 |
+| `/batch` | BatchUploadPage | 批量上傳、信心檢視與角點調整 |
+| `/batch/result` | BatchResultPage | 批量聚合進度、逐張結果、匯出 |
+
+---
+
+## API 一覽
+
+| 方法 | 路徑 | 說明 |
+|---|---|---|
+| POST | `/api/v1/corner/detect` | 單張角點偵測 |
+| POST | `/api/v1/corner/correct` | 單張透視校正 |
+| POST | `/api/v1/ocr/upload` | 單張 OCR 提交 |
+| GET | `/api/v1/ocr/{task_id}` | 單張 OCR 狀態/結果 |
+| POST | `/api/v1/ocr/batch/prepare` | 批量角點預處理 |
+| POST | `/api/v1/ocr/batch/submit` | 批量 OCR 提交 |
+| GET | `/api/v1/ocr/batch/{batch_id}` | 批量 OCR 狀態/結果 |
+| WS | `/api/v1/ws/{task_id}` | 單張進度推播 |
+| WS | `/api/v1/ws/batch/{batch_id}` | 批量進度推播 |
+| GET | `/api/v1/health` | 健康檢查（含 version） |
+
+---
+
+## OCR Pipeline 階段
+
+後端 `OCRPipeline.run()` 的主要進度節點：
+
+- `0.10`：偵測文字區塊
+- `0.25`：校正傾斜
+- `0.40`：移除印刷文字
+- `0.55`：提取格線結構
+- `0.65`：重新格式化版面
+- `0.65-0.95`：辨識第 N 欄
+- `1.00`：完成
+
+---
+
 ## 技術棧
 
 | 層級        | 技術                                       |
 | --------- | ---------------------------------------- |
 | 文字偵測      | CRAFT（透過 EasyOCR）                        |
-| OCR / VLM | Qwen2.5-VL (vLLM) 或 Gemini / OpenAI API  |
+| OCR / VLM | vLLM（可替換模型）或 Gemini / OpenAI API |
 | 後端        | Python 3.10+, FastAPI, PyTorch, OpenCV   |
 | 前端        | React 19, TypeScript, Vite 7, Tailwind CSS 4, Konva |
 | 部署        | Docker Compose                           |
@@ -138,6 +184,15 @@ docker compose down
 
 ## 已知缺陷
 
-1. **任務無持久化**：任務狀態與暫存圖片均為 in-memory，重啟後全部遺失。生產環境建議遷移至 Redis。
-2. **Docker 未驗證**：`docker-compose.yml` 撰寫完成但尚未在乾淨環境驗證完整啟動流程，本地開發直接啟動即可。
-3. **測試覆蓋不完整**：僅 `text_reformat` 模組有單元測試（9 個），其餘模組尚無測試。
+1. **任務無持久化**：`_tasks`、`_pending_images`、`_batches` 均為 in-memory，重啟會遺失。
+2. **Docker 乾淨環境驗證不足**：compose 已可用，但仍建議在全新環境完整驗證。
+3. **測試覆蓋不完整**：目前以 `text_reformat`（9 個測試）為主，其餘模組測試尚待補強。
+4. **CORS 全開**：`allow_origins=["*"]`，生產環境應改為白名單。
+5. **批量回應檔名欄位待補**：`/ocr/batch/submit` 回傳的 task `filename` 目前為空字串。
+
+---
+
+## 版本
+
+- 後端 `FastAPI version`：`3.0.0`
+- `GET /api/v1/health` 的 `version`：`3.0.0`
