@@ -83,6 +83,53 @@ class OCRStatusResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Batch OCR
+# ---------------------------------------------------------------------------
+
+class BatchTaskItem(BaseModel):
+    task_id: str
+    filename: str
+    status: TaskStatus = TaskStatus.pending
+
+class BatchSubmitResponse(BaseModel):
+    batch_id: str
+    tasks: List[BatchTaskItem]
+
+class BatchStatusResponse(BaseModel):
+    batch_id: str
+    total: int
+    completed: int
+    failed: int
+    processing: int
+    progress: float = Field(0.0, ge=0.0, le=1.0)
+    tasks: List[OCRStatusResponse]
+
+
+# ---------------------------------------------------------------------------
+# Batch prepare (corner detection + manual override before OCR)
+# ---------------------------------------------------------------------------
+
+class BatchPrepareItem(BaseModel):
+    task_id: str
+    filename: str
+    corners: List[Point]  # 4 points in original-image coordinates
+    confidence: float = Field(ge=0.0, le=1.0)
+
+class BatchPrepareResponse(BaseModel):
+    items: List[BatchPrepareItem]
+
+class BatchCorrectionItem(BaseModel):
+    task_id: str
+    corners: List[Point]  # final corners (auto or manually overridden)
+
+class BatchSubmitRequest(BaseModel):
+    corrections: List[BatchCorrectionItem]
+    auto_rotate: bool = True
+    remove_print: bool = True
+    auto_split: bool = True
+
+
+# ---------------------------------------------------------------------------
 # Health
 # ---------------------------------------------------------------------------
 
@@ -103,3 +150,12 @@ class WSProgressMessage(BaseModel):
     progress: float = 0.0
     message: str = ""
     status: str = "processing"  # "processing" | "completed" | "failed"
+
+
+class WSBatchProgressMessage(BaseModel):
+    batch_id: str
+    progress: float = 0.0
+    completed: int = 0
+    failed: int = 0
+    total: int = 0
+    status: str = "processing"  # "processing" | "completed"
