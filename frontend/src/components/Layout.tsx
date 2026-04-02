@@ -5,6 +5,7 @@ import { Link, useLocation } from "react-router-dom";
 
 const NAV = [
   { to: "/", label: "上傳" },
+  { to: "/batch", label: "批量" },
   { to: "/result", label: "結果" },
 ];
 
@@ -33,7 +34,7 @@ export default function Layout({ children }: { children: ReactNode }) {
               key={n.to}
               to={n.to}
               className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
-                pathname === n.to
+                pathname === n.to || (n.to === "/batch" && pathname.startsWith("/batch"))
                   ? "bg-white text-indigo-700 shadow-sm"
                   : "text-gray-600 hover:bg-white hover:text-gray-900"
               }`}

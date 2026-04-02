@@ -60,6 +60,54 @@ export interface HealthResponse {
   version: string;
 }
 
+// -- Batch OCR --
+
+export interface BatchTaskItem {
+  task_id: string;
+  filename: string;
+  status: TaskStatus;
+}
+
+export interface BatchSubmitResponse {
+  batch_id: string;
+  tasks: BatchTaskItem[];
+}
+
+export interface BatchStatusResponse {
+  batch_id: string;
+  total: number;
+  completed: number;
+  failed: number;
+  processing: number;
+  progress: number;
+  tasks: OCRStatusResponse[];
+}
+
+// -- Batch prepare (corner detection before OCR) --
+
+export interface BatchPrepareItem {
+  task_id: string;
+  filename: string;
+  corners: Point[];
+  confidence: number;
+}
+
+export interface BatchPrepareResponse {
+  items: BatchPrepareItem[];
+}
+
+export interface BatchCorrectionItem {
+  task_id: string;
+  corners: Point[];
+}
+
+export interface BatchSubmitRequest {
+  corrections: BatchCorrectionItem[];
+  auto_rotate?: boolean;
+  remove_print?: boolean;
+  auto_split?: boolean;
+}
+
 // -- WebSocket progress --
 
 export interface WSProgressMessage {
@@ -68,4 +116,13 @@ export interface WSProgressMessage {
   progress: number;
   message: string;
   status: "processing" | "completed" | "failed";
+}
+
+export interface WSBatchProgressMessage {
+  batch_id: string;
+  progress: number;
+  completed: number;
+  failed: number;
+  total: number;
+  status: "processing" | "completed";
 }

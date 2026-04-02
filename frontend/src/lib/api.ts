@@ -1,6 +1,10 @@
 /** API client — all backend calls in one place. */
 
 import type {
+  BatchPrepareResponse,
+  BatchStatusResponse,
+  BatchSubmitRequest,
+  BatchSubmitResponse,
   CornerCorrectRequest,
   CornerCorrectResponse,
   CornerDetectResponse,
@@ -67,9 +71,36 @@ export async function pollOCRStatus(taskId: string): Promise<OCRStatusResponse> 
   return json<OCRStatusResponse>(await fetch(`${BASE}/ocr/${taskId}`));
 }
 
+// -- Batch OCR --
+
+export async function prepareBatch(files: File[]): Promise<BatchPrepareResponse> {
+  const fd = new FormData();
+  for (const f of files) fd.append("files", f);
+  return json<BatchPrepareResponse>(await fetch(`${BASE}/ocr/batch/prepare`, { method: "POST", body: fd }));
+}
+
+export async function submitBatch(req: BatchSubmitRequest): Promise<BatchSubmitResponse> {
+  return json<BatchSubmitResponse>(
+    await fetch(`${BASE}/ocr/batch/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    }),
+  );
+}
+
+export async function pollBatchStatus(batchId: string): Promise<BatchStatusResponse> {
+  return json<BatchStatusResponse>(await fetch(`${BASE}/ocr/batch/${batchId}`));
+}
+
 // -- WebSocket --
 
 export function connectProgressWS(taskId: string): WebSocket {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   return new WebSocket(`${proto}//${window.location.host}${BASE}/ws/${taskId}`);
+}
+
+export function connectBatchProgressWS(batchId: string): WebSocket {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return new WebSocket(`${proto}//${window.location.host}${BASE}/ws/batch/${batchId}`);
 }

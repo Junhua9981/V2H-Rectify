@@ -9,6 +9,8 @@ import { useOCRProgress } from "../hooks/useOCRProgress";
 import ProgressBar from "../components/ProgressBar";
 import ManuscriptView from "../components/ManuscriptView";
 import ZoomableImage from "../components/ZoomableImage";
+import ExportMenu from "../components/ExportMenu";
+import { exportSingleJson, exportSingleTxt } from "../lib/export";
 
 interface ResultLocationState {
   originalImageUrl?: string;
@@ -185,31 +187,48 @@ export default function ResultPage() {
               ← 上傳新圖片
             </Link>
 
-            <button
-              onClick={copyText}
-              className={`inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
-                copied
-                  ? "bg-emerald-500 scale-95"
-                  : "bg-indigo-600 hover:bg-indigo-700 active:scale-95"
-              }`}
-            >
-              {copied ? (
-                <>
-                  <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                  </svg>
-                  已複製！
-                </>
-              ) : (
-                <>
-                  <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                    <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
-                    <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z" />
-                  </svg>
-                  複製文字
-                </>
-              )}
-            </button>
+            <div className="flex items-center gap-2">
+              <ExportMenu
+                options={[
+                  {
+                    label: "純文字 (.txt)",
+                    onClick: () =>
+                      exportSingleTxt({ title, text, columns, rotation_angle: null, elapsed_seconds: elapsed, filename: originalFileName }),
+                  },
+                  {
+                    label: "結構化資料 (.json)",
+                    onClick: () =>
+                      exportSingleJson({ title, text, columns, rotation_angle: null, elapsed_seconds: elapsed, filename: originalFileName }),
+                  },
+                ]}
+              />
+
+              <button
+                onClick={copyText}
+                className={`inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none ${
+                  copied
+                    ? "bg-emerald-500 scale-95"
+                    : "bg-indigo-600 hover:bg-indigo-700 active:scale-95"
+                }`}
+              >
+                {copied ? (
+                  <>
+                    <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                    </svg>
+                    已複製！
+                  </>
+                ) : (
+                  <>
+                    <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                      <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
+                      <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z" />
+                    </svg>
+                    複製文字
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </>
       )}
