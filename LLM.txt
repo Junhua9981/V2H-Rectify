@@ -1,558 +1,597 @@
-# V2H-Rectify — LLM Agent Codebase Reference
-# Version: 3.1.0
-# Language: Traditional Chinese Handwritten OCR System
-# Updated: 2026-03-22
+    ˋˇ２# V2H-Rectify - LLM Agent Codebase Reference
+# Version: 3.0.0
+# Updated: 2026-04-02
+# Branch: feat/current-updates-20260402
 
-## SYSTEM IDENTITY
+## 0. PURPOSE OF THIS FILE
 
-V2H-Rectify (Vertical-to-Horizontal Rectify) is a full-stack OCR system that detects, corrects perspective, and transcribes Traditional Chinese handwritten text from scanned manuscript paper (稿紙). It converts vertical (top-to-bottom, right-to-left) handwriting into horizontal digital text.
+This file is an implementation-accurate reference for coding agents.
+Use it as the primary map before editing code.
+It is focused on real behavior in current source code, not planned behavior.
 
-## ARCHITECTURE
+-------------------------------------------------------------------------------
 
-### Service Topology
+## 1. SYSTEM IDENTITY
 
-```
-frontend (nginx:80 → host:3000)
-  ├── serves React SPA static files
-  ├── proxies /api/* → backend:8000
-  └── upgrades /api/v1/ws/* to WebSocket → backend:8000
+V2H-Rectify is a full-stack OCR system for Traditional Chinese handwritten
+manuscript paper.
 
-backend (uvicorn:8000 → host:8080)
-  ├── FastAPI with CRAFT text detection (GPU)
-  ├── OpenCV image processing pipeline
-  └── calls VLM via OpenAI-compatible API
+Main capabilities:
+1. Corner detection and perspective correction
+2. OCR pipeline with CRAFT + OpenCV preprocessing + VLM recognition
+3. Real-time progress over WebSocket
+4. Single-image and batch OCR workflows
+5. Frontend UI for corner editing, progress monitoring, and result export
 
-vllm (vllm:8000 → host:8001)
-  └── OpenAI-compatible inference server (Qwen2.5-VL)
-```
+-------------------------------------------------------------------------------
 
-### Request Flow
+## 2. RUNTIME ARCHITECTURE
 
-```
-User uploads image
-  → POST /api/v1/corner/detect        (returns corners + task_id)
-  → POST /api/v1/corner/correct       (perspective warp, stores corrected image)
-  → POST /api/v1/ocr/upload           (starts async OCR, returns task_id)
-  → WS /api/v1/ws/{task_id}           (real-time progress: stage + progress + status)
-  → GET /api/v1/ocr/{task_id}         (poll for result; triggered immediately on WS completion)
-  → Response: { title, text, columns[], rotation_angle, elapsed_seconds }
-```
+### 2.1 Service topology
 
-## DIRECTORY MAP
+- frontend: Nginx static host and reverse proxy
+  - host port: 3000
+- backend: FastAPI app
+  - host port: 8080
+- vllm: OpenAI-compatible inference backend
+  - host port: 8001
 
-```
+### 2.2 Network/proxy assumptions
+
+- Frontend dev server proxies /api to http://localhost:8080
+- WebSocket endpoints are also under /api/v1/ws/*
+- Vite polling watch is enabled to avoid container inotify limits
+  - usePolling: true
+  - interval: 300ms
+
+-------------------------------------------------------------------------------
+
+## 3. HIGH-LEVEL FLOWS
+
+### 3.1 Single OCR flow
+
+1. POST /api/v1/corner/detect
+2. Optional manual correction in UI
+3. POST /api/v1/corner/correct
+4. POST /api/v1/ocr/upload
+5. WS /api/v1/ws/{task_id} for stage/progress
+6. GET /api/v1/ocr/{task_id} for fallback/final result
+
+### 3.2 Batch OCR flow
+
+1. POST /api/v1/ocr/batch/prepare
+   - accepts up to 50 files
+   - returns per-image task_id + auto corners + confidence
+2. Optional per-image corner edits in frontend state
+3. POST /api/v1/ocr/batch/submit with final corners
+4. WS /api/v1/ws/batch/{batch_id} for aggregated batch progress
+5. GET /api/v1/ocr/batch/{batch_id} for full per-task results
+
+-------------------------------------------------------------------------------
+
+## 4. DIRECTORY MAP (CURRENT, IMPORTANT PARTS)
+
 V2H-Rectify/
-├── docker-compose.yml                 # 3-service orchestration (vllm + backend + frontend)
-├── README.md                          # Quick start guide (Traditional Chinese)
-├── HANDOVER.md                        # Handover document for human maintainers
-├── LLM.txt                            # This file — LLM agent reference
-│
-├── backend/
-│   ├── Dockerfile                     # Python 3.11-slim + OpenCV system libs
-│   ├── pyproject.toml                 # Dependencies: torch, easyocr, fastapi, opencv, openai
-│   ├── .env.example                   # Environment variable template
-│   │
-│   ├── api/
-│   │   ├── __init__.py
-│   │   ├── app.py                     # FastAPI factory + lifespan (service init/cleanup)
-│   │   ├── deps.py                    # Dependency injection: get_craft(), get_vlm(), get_pipeline()
-│   │   ├── schemas.py                 # All Pydantic request/response DTOs
-│   │   ├── ws.py                      # WebSocket progress broadcaster (actively used by pipeline)
-│   │   └── routes/
-│   │       ├── __init__.py
-│   │       ├── corner.py              # POST /corner/detect, POST /corner/correct
-│   │       ├── ocr.py                 # POST /ocr/upload, GET /ocr/{task_id}
-│   │       └── health.py             # GET /health
-│   │
-│   ├── config/
-│   │   ├── __init__.py
-│   │   └── settings.py               # Pydantic Settings v2: CRAFTSettings, VLMSettings, OCRPipelineSettings, ServerSettings
-│   │
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── craft_detector.py          # CRAFT text detection wrapper, CRAFTResult dataclass
-│   │   ├── grid_extractor.py          # Projection-based row/column grid detection
-│   │   ├── image_utils.py             # pil_to_bgr(), bgr_to_pil(), split_wide_image()
-│   │   ├── perspective.py             # Corners dataclass, detect_corners(), warp_perspective()
-│   │   ├── print_removal.py           # Classify printed vs handwritten, crop print region
-│   │   ├── rotation.py                # Multi-method skew estimation + correction
-│   │   └── text_reformat.py           # Vertical-to-horizontal conversion + blank cell detection (simplified)
-│   │
-│   ├── services/
-│   │   ├── __init__.py
-│   │   ├── craft_service.py           # Thread-safe batched CRAFT inference service
-│   │   ├── vlm_service.py             # Multi-backend VLM strategy (vllm/gemini/openai)
-│   │   └── ocr_pipeline.py            # End-to-end OCR orchestrator with on_progress callback
-│   │
-│   └── tests/
-│       └── test_text_reformat.py      # 9 unit tests for blank cell detection logic
-│
-└── frontend/
-    ├── Dockerfile                     # Multi-stage: Node 20 build → Nginx 1.27 serve
-    ├── nginx.conf                     # SPA fallback + /api proxy + WebSocket upgrade
-    ├── package.json                   # React 19, Konva, react-dropzone, Tailwind CSS 4
-    ├── vite.config.ts                 # Dev proxy + polling watcher (usePolling: true, interval: 300ms)
-    ├── tsconfig.json                  # Project references
-    ├── tsconfig.app.json              # Strict mode, ES2022 target
-    ├── index.html                     # SPA entry point
-    │
-    └── src/
-        ├── App.tsx                    # Root: <Layout> + <Routes> (/ and /result)
-        ├── main.tsx                   # ReactDOM.createRoot + BrowserRouter
-        ├── index.css                  # Tailwind CSS + radial gradient background
-        │
-        ├── components/
-        │   ├── Layout.tsx             # Sticky navbar + main content area
-        │   ├── ImageDropzone.tsx      # Drag-and-drop file upload (react-dropzone)
-        │   ├── CornerEditor.tsx       # Konva Canvas: 4 draggable corners + magnifier
-        │   ├── ManuscriptView.tsx     # RTL grid renderer for vertical Chinese manuscript
-        │   ├── ProgressBar.tsx        # Shimmer animation at 0%, gradient fill with stage label
-        │   └── ZoomableImage.tsx      # Scroll-to-zoom + drag-to-pan image viewer
-        │
-        ├── hooks/
-        │   └── useOCRProgress.ts      # WebSocket + REST polling state manager
-        │
-        ├── lib/
-        │   ├── api.ts                 # All REST/WS API calls
-        │   └── types.ts              # TypeScript types mirroring backend schemas
-        │
-        └── pages/
-            ├── UploadPage.tsx         # Upload → Corner editing → OCR submit (step indicator)
-            └── ResultPage.tsx         # Real-time progress + result display (side-by-side layout)
-```
-
-## BACKEND MODULES
-
-### api/app.py
-- **Exports**: `app` (FastAPI instance), `create_app()` factory
-- **Lifespan**: `async def lifespan(app)` — initializes CRAFTService, VLMService, OCRPipeline on startup; calls `craft_svc.stop()` + `clear_services()` on shutdown
-- **Middleware**: CORS with `allow_origins=["*"]`
-- **Route prefix**: `/api/v1`
-
-### api/deps.py
-- **Exports**: `get_craft()`, `get_vlm()`, `get_pipeline()` — FastAPI `Depends()` callables
-- **Pattern**: Module-level singletons set by `set_services()` during lifespan, cleared by `clear_services()`
-
-### api/schemas.py
-- **Exports** (all Pydantic BaseModel):
-  - `TaskStatus` (enum: pending, processing, completed, failed)
-  - `Point` (x: float, y: float)
-  - `CornerDetectResponse` (task_id, corners: List[Point], confidence)
-  - `CornerCorrectRequest` (task_id, corners: List[Point])
-  - `CornerCorrectResponse` (corrected: bool, preview_url)
-  - `OCROptions` (auto_rotate, remove_print, auto_split — all bool, default True)
-  - `OCRSubmitResponse` (task_id, status)
-  - `ColumnData` (col_index, text, spacing_indexes: List[int], num_rows)
-  - `OCRStatusResponse` (task_id, status, progress, title?, text?, columns[], rotation_angle?, elapsed_seconds?, error?)
-  - `HealthResponse` (status, craft_loaded, vlm_backend, version)
-  - `WSProgressMessage` (task_id, stage, progress, message, status)  ← status field added
-
-### api/ws.py
-- **Exports**: `router` (APIRouter), `broadcast_progress(task_id, stage, progress, message, status)`
-- **Endpoint**: `WS /ws/{task_id}` — accepts connection, adds to `_connections` dict, keeps alive until disconnect
-- **Broadcast**: sends `WSProgressMessage` JSON to all connected clients for a task_id
-- **Status**: now includes `status` field so clients know when task is completed/failed via WS
-
-### api/routes/corner.py
-- **Prefix**: `/corner`
-- **In-memory store**: `_pending_images: dict[str, np.ndarray]` — maps task_id to BGR image
-- `POST /detect`: Upload image → `detect_corners(img)` → returns corners + task_id. Falls back to full image corners with confidence=0 if detection fails or area < 0.35
-- `POST /correct`: Takes `CornerCorrectRequest` → `warp_perspective(img, corners)` → stores warped image back in `_pending_images`
-
-### api/routes/ocr.py
-- **Prefix**: `/ocr`
-- **In-memory store**: `_tasks: Dict[str, dict]`
-- `POST /upload`: Runs `_run_ocr()` in executor (non-blocking). Returns task_id + status=processing
-- `GET /{task_id}`: Returns `OCRStatusResponse`
-- **`_run_ocr(task_id, img_bgr, pipeline, opts, loop)`**:
-  - Receives the running event loop as argument
-  - Defines `on_progress(stage, progress)` callback that uses `asyncio.run_coroutine_threadsafe()` to safely call async `broadcast_progress()` from the sync executor thread
-  - Passes `on_progress` to `pipeline.run()`
-  - On completion: broadcasts `status="completed"` with progress=1.0
-
-### api/routes/health.py
-- `GET /health`: Returns `HealthResponse` with craft_loaded and vlm_backend status
-
-### config/settings.py
-- **Root class**: `Settings(BaseSettings)` with `env_nested_delimiter="__"`
-- **Sub-configs**: `CRAFTSettings`, `VLMSettings`, `OCRPipelineSettings`, `ServerSettings`
-- **Singleton**: `get_settings()` returns cached `Settings` instance
-- **OCRPipelineSettings reformat fields** (4 total, down from 18):
-  - `reformat_spacing: int = 20`
-  - `reformat_binary_threshold: int = 128`
-  - `reformat_blank_ink_ratio: float = 0.04`
-  - `reformat_heat_rescue_peak: float = 0.40`
-
-### services/craft_service.py
-- **Class**: `CRAFTService`
-- **Pattern**: Background worker thread + Queue for batched inference
-- **Key methods**: `start()` / `stop()`, `detect(image) → CRAFTResult`
-- **Thread safety**: Uses `queue.Queue` and `threading.Event`
-
-### services/vlm_service.py
-- **Class**: `VLMService`
-- **Pattern**: Strategy pattern with 3 backends
-- **Factory**: `VLMService.from_settings(vlm_settings)`
-- **Key method**: `recognize(image_b64: str, prompt: str) → str`
-
-### services/ocr_pipeline.py
-- **Class**: `OCRPipeline`
-- **Key method**: `run(pil_img, auto_rotate, remove_print, auto_split, on_progress=None) → OCRResult`
-  - `on_progress: Callable[[str, float], None] | None` — called at each stage with (stage_name, progress_0_to_1)
-- **Progress events emitted**:
-
-  | Progress | Stage name (zh) |
-  |---|---|
-  | 0.10 | `"偵測文字區塊"` |
-  | 0.25 | `"校正傾斜"` |
-  | 0.40 | `"移除印刷文字"` |
-  | 0.55 | `"提取格線結構"` |
-  | 0.65 | `"重新格式化版面"` |
-  | 0.65–0.95 | `"辨識第 N 欄"` (per-column, evenly distributed) |
-  | 1.00 | `"完成"` |
-
-- **Return type**: `OCRResult` dataclass (title, text, columns, rotation_angle, elapsed_seconds)
-
-### core/perspective.py
-- **Exports**: `Corners`, `detect_corners(img_bgr) → Corners | None`, `warp_perspective(img_bgr, corners) → np.ndarray`
-
-### core/craft_detector.py
-- **Exports**: `CRAFTResult` (immutable dataclass: boxes, confidences, image_shape), `run_craft(model, image)`
-
-### core/grid_extractor.py
-- **Exports**: `extract_grid(boxes, img_shape) → GridResult`
-
-### core/rotation.py
-- **Exports**: `estimate_angle(boxes) → float`, `correct_rotation(img, boxes) → tuple[np.ndarray, float]`
-
-### core/print_removal.py
-- **Exports**: `classify_print_handwritten(boxes)`, `remove_print_region(img, boxes) → np.ndarray`
-
-### core/text_reformat.py
-- **Exports**: `reformat_columns(img, grid_boxes, *, config, ink_map) → list[ReformattedColumn]`, `refine_text_raw(recognized_texts)`, `TextReformatConfig`
-- **TextReformatConfig** (frozen dataclass, 4 fields):
-  ```python
-  spacing: int = 20
-  binary_threshold: int = 128
-  blank_ink_ratio: float = 0.04   # fill ratio below this = sparse ink
-  heat_rescue_peak: float = 0.40  # heatmap peak above this = definitely a character
-  ```
-- **Module-level constants** (hardcoded, not configurable):
-  - `_LINE_THICKNESS_RATIO = 0.10`
-  - `_LINE_SPAN_RATIO = 0.50`
-  - `_HEAT_ACTIVE_THRESHOLD = 0.35`
-  - `_HEAT_RESCUE_ACTIVE = 0.03`
-- **`_is_blank_cell(binary, ink_crop, bw, bh, cfg) → bool`** — priority decision tree:
-  1. `heat_peak >= cfg.heat_rescue_peak` → NOT blank (strong character signal, highest priority)
-  2. `fill_ratio == 0` → blank
-  3. Line shape (thin horizontal/vertical) → if `heat_active >= _HEAT_RESCUE_ACTIVE`: NOT blank (e.g. 「一」); else: blank (printed grid line)
-  4. `fill_ratio <= cfg.blank_ink_ratio` → if has heatmap: blank (noise); else: NOT blank (benefit of doubt)
-  5. Meaningful ink → NOT blank
-- **Key design**: line detection rescue is independent of global rescue — printed grid lines (heat_active < 3%) are never rescued
-
-### core/image_utils.py
-- **Exports**: `pil_to_bgr()`, `bgr_to_pil()`, `split_wide_image()`
-
-## API ENDPOINTS — FULL SIGNATURES
-
-### POST /api/v1/corner/detect
-- **Request**: `multipart/form-data` with `file: UploadFile`
-- **Response 200**: `{ task_id: str, corners: [{x,y}×4], confidence: float, preview_url: str }`
-- **Corner order**: [top-left, top-right, bottom-right, bottom-left]
-- **Side effect**: Stores BGR image in `_pending_images[task_id]`
-
-### POST /api/v1/corner/correct
-- **Request**: `{ task_id: str, corners: [{x,y}×4] }`
-- **Response 200**: `{ corrected: true, preview_url: "" }`
-- **Side effect**: Replaces `_pending_images[task_id]` with warped image
-
-### POST /api/v1/ocr/upload
-- **Request**: `multipart/form-data`: `file`, `auto_rotate`, `remove_print`, `auto_split`, `task_id?`
-- **Response 200**: `{ task_id: str, status: "processing" }`
-- **Side effect**: Starts background OCR, `on_progress` callback bridges to WebSocket via `run_coroutine_threadsafe`
-
-### GET /api/v1/ocr/{task_id}
-- **Response 200**: `{ task_id, status, progress(0-1), title?, text?, columns[], rotation_angle?, elapsed_seconds?, error? }`
-- **Status transitions**: pending → processing → completed | failed
-
-### WS /api/v1/ws/{task_id}
-- **Protocol**: WebSocket
-- **Server→Client messages**: `{ task_id, stage, progress(0-1), message, status }`
-- **Active**: pipeline broadcasts at each processing stage; sends `status="completed"/"failed"` on finish
-- **Frontend behavior**: on receiving completed/failed status, immediately fires a final REST poll (no 2s wait)
-
-### GET /api/v1/health
-- **Response 200**: `{ status: "ok", craft_loaded: bool, vlm_backend: str, version: "3.1.0" }`
-
-## FRONTEND MODULES
-
-### App.tsx
-- Routes: `/` → UploadPage, `/result` → ResultPage, wrapped in `<Layout>`
-
-### pages/UploadPage.tsx
-- **State machine**: `step: "upload" | "corner" | "submitting"`
-- **Step indicator**: 3 steps with connecting lines; completed steps show checkmark icon
-- Steps: upload → corner edit → submit; each step visually connected with progress-aware line color
-
-### pages/ResultPage.tsx
-- Reads `taskId` from URL query params; `originalImageUrl` from router location state
-- Uses `useOCRProgress(taskId)` hook
-- **Layout**: side-by-side on large screens (`grid lg:grid-cols-2`)
-  - Left: `<ZoomableImage>` (original image, interactive zoom/pan)
-  - Right: OCR text with linear/manuscript toggle
-- Shows `<ProgressBar>` during processing
-- Copy button: copies title + text to clipboard with animation feedback
-
-### components/ZoomableImage.tsx
-- **Props**: `src: string, alt: string, className?: string`
-- **Features**:
-  - Scroll-to-zoom centered on cursor position (0.25×–10×, factor 1.18)
-  - Mouse drag to pan; single-touch drag on mobile
-  - Pan clamped: image always overlaps container by ≥60px (never fully disappears)
-  - Zoom controls: +/−/↺ buttons, scale percentage indicator
-  - `wheel` event registered with `{ passive: false }` via `useEffect` to prevent page scroll
-  - Uses `viewRef` (ref mirrors state) so non-React event handlers always see latest values
-
-### components/CornerEditor.tsx
-- **Props**: `imgSrc, corners: Point[], onConfirm, onSkip`
-- Konva Stage: 4 draggable circles (TL=red, TR=orange, BR=green, BL=blue), polygon overlay
-- Magnifier: 140×140px at 2.4x zoom with crosshair during drag
-- Auto-scales to 82% viewport height or max 980px
-
-### components/ImageDropzone.tsx
-- **Props**: `onFile: (file: File) => void`
-- Accepts: `image/*`, maxFiles: 1, visual drag-over feedback
-
-### components/ManuscriptView.tsx
-- **Props**: `columns: ColumnData[], cellSize?: number (default 36)`
-- RTL grid (`dir="rtl"`), column 0 is rightmost
-- spacing_indexes insert empty rows
-
-### components/ProgressBar.tsx
-- **Props**: `progress: number (0-1), stage?: string`
-- At `progress === 0`: shimmer sweep animation + spinner with stage label
-- At `progress > 0`: indigo→blue gradient fill bar
-
-### hooks/useOCRProgress.ts
-- **Input**: `taskId: string | null`
-- **Returns**: `{ status, progress, stage, title, text, columns, error, elapsed }`
-- **Behavior**:
-  - Opens WebSocket to `/api/v1/ws/{taskId}`
-  - Starts 2s REST polling interval
-  - On WS message with `status === "completed" | "failed"`: immediately fires one final `pollOCRStatus()` call then cleans up (no 2s wait)
-  - Cleans up both WS and interval on completion/unmount
-
-### lib/api.ts
-- `fetchHealth() → HealthResponse`
-- `detectCorners(file) → CornerDetectResponse`
-- `correctCorners(req) → CornerCorrectResponse`
-- `submitOCR(file, opts?) → OCRSubmitResponse`
-- `pollOCRStatus(taskId) → OCRStatusResponse`
-- `connectProgressWS(taskId) → WebSocket` (ws[s]://host/api/v1/ws/{taskId})
-
-### lib/types.ts
-- Mirrors `backend/api/schemas.py`
-- `WSProgressMessage` includes `status?: string` field
-
-### vite.config.ts
-- Dev proxy: `/api` → `http://localhost:8080`
-- `server.watch.usePolling: true, interval: 300` — avoids `ENOSPC: inotify watch limit` in container environments
-
-## CONFIGURATION REFERENCE
-
-### Settings Hierarchy (backend/config/settings.py)
-
-```
-Settings (root)
-├── cuda_device: str = "cuda:7"          # env: CUDA_DEVICE (override to cuda:0 in prod)
-├── log_level: str = "INFO"
-├── log_format: "simple"|"default"|"detailed" = "default"
-│
-├── craft: CRAFTSettings                 # env prefix: CRAFT__
-│   ├── languages: list[str] = ["ch_tra"]
-│   ├── canvas_size: int = 2560
-│   ├── text_threshold: float = 0.7
-│   ├── link_threshold: float = 0.4
-│   ├── low_text: float = 0.4
-│   ├── mag_ratio: float = 1.0
-│   ├── batch_size: int = 8
-│   └── batch_timeout: float = 0.1
-│
-├── vlm: VLMSettings                    # env prefix: VLM__
-│   ├── backend: "vllm"|"gemini"|"openai" = "vllm"
-│   ├── vllm_base_url: str = "http://localhost:8000/v1"
-│   ├── vllm_api_key: str = "EMPTY"
-│   ├── vllm_model_name: str = "Qwen/Qwen3-VL-2B-Instruct"
-│   ├── gemini_api_key: str = ""
-│   ├── gemini_model_name: str = "gemini-2.0-flash"
-│   ├── openai_api_key: str = ""
-│   └── openai_model_name: str = "gpt-4o"
-│
-├── pipeline: OCRPipelineSettings       # env prefix: PIPELINE__
-│   ├── auto_rotate: bool = True
-│   ├── remove_print: bool = True
-│   ├── auto_split: bool = True
-│   ├── max_workers: int = 4
-│   ├── timeout: int = 120
-│   ├── rotation_min_centroids: int = 10
-│   ├── rotation_min_clusters: int = 3
-│   ├── rotation_max_angle: float = 45.0
-│   ├── print_angle_threshold: float = 3.0
-│   ├── print_row_ratio_threshold: float = 0.8
-│   ├── split_aspect_ratio: float = 2.0
-│   ├── debug_enabled: bool = False
-│   ├── debug_dir: Path = "./debug/ocr_pipeline"
-│   ├── reformat_spacing: int = 20
-│   ├── reformat_binary_threshold: int = 128
-│   ├── reformat_blank_ink_ratio: float = 0.04
-│   └── reformat_heat_rescue_peak: float = 0.40
-│
-└── server: ServerSettings
-    ├── host: str = "0.0.0.0"
-    ├── port: int = 8080
-    ├── workers: int = 1
-    ├── upload_dir: Path = "./uploads"
-    └── max_upload_size_mb: int = 20
-```
-
-## DATA FLOW — END-TO-END OCR PIPELINE
-
-```
-Input: PIL.Image
-  │
-  ├─[1] split_wide_image()           # if aspect_ratio > 2.0 and auto_split=True
-  │
-  ├─[2] craft_svc.detect(img)        # CRAFT text detection → on_progress("偵測文字區塊", 0.10)
-  │     → CRAFTResult { boxes, confidences, image_shape }
-  │
-  ├─[3] correct_rotation(img, boxes) # if auto_rotate → on_progress("校正傾斜", 0.25)
-  │
-  ├─[4] remove_print_region(img)     # if remove_print → on_progress("移除印刷文字", 0.40)
-  │
-  ├─[5] extract_grid(boxes)          # → on_progress("提取格線結構", 0.55)
-  │
-  ├─[6] reformat_columns(img, grid)  # → on_progress("重新格式化版面", 0.65)
-  │     Uses TextReformatConfig (4 params) + _is_blank_cell() decision tree
-  │
-  ├─[7] CONCURRENT VLM OCR           # ThreadPoolExecutor(max_workers=4)
-  │     for each column:             # → on_progress("辨識第 N 欄", 0.65 + N/total * 0.30)
-  │       → vlm_svc.recognize(image_b64, prompt) → text
-  │
-  └─[8] refine_text_raw() + title detection → on_progress("完成", 1.00)
-
-Output: OCRResult { title, text, columns[], rotation_angle, elapsed_seconds }
-```
-
-## CONVENTIONS & PATTERNS
-
-### Backend Patterns
-- **Dependency Injection**: FastAPI `Depends()` with singleton getters in `deps.py`
-- **Lifespan Management**: `@asynccontextmanager async def lifespan(app)`
-- **Strategy Pattern**: `VLMService` with pluggable backends
-- **Batching Pattern**: `CRAFTService` uses Queue + worker thread
-- **Executor Bridge**: `run_coroutine_threadsafe(loop, coro)` to call async from sync executor thread
-- **Ref-mirrors-State**: `viewRef` in ZoomableImage mirrors React state for non-React event handlers
-- **Non-passive Wheel**: `el.addEventListener("wheel", fn, { passive: false })` via useEffect for zoom-without-scroll
-- **In-memory state**: Both `_pending_images` and `_tasks` are plain dicts (not Redis)
-
-### Frontend Patterns
-- **No global state library**: All state via `useState` at page level
-- **API centralization**: All backend calls in `lib/api.ts`
-- **Dual progress tracking**: WebSocket (real-time stages) + REST polling (2s fallback)
-- **Immediate final poll**: WS completed/failed → instant REST poll, no polling delay
-- **Canvas interaction**: Konva for corner editing
-
-### Naming Conventions
-- **Backend**: snake_case for files/functions/vars, PascalCase for classes
-- **Frontend**: PascalCase for component files/types, camelCase otherwise
-- **Env vars**: UPPER_SNAKE_CASE with `__` nesting delimiter
-
-### Error Handling
-- **Backend routes**: HTTPException(400/404)
-- **Core modules**: Return None/empty on failure, log warnings
-- **Frontend**: `json<T>()` throws on non-ok; polling ignores transient errors
-
-## KNOWN ISSUES & TECH DEBT
-
-1. ~~**Progress bar non-functional**~~ ✅ **RESOLVED**: Pipeline now calls `on_progress` callback at each stage; bridged to WebSocket via `run_coroutine_threadsafe`.
-2. **In-memory task storage**: `_tasks` and `_pending_images` are dict-based. No persistence across restarts.
-3. **Heatmap neighbor bleed**: CRAFT heatmap activations from adjacent characters can bleed into blank cells at their edges. Analyzed but not yet fixed (solution: use center 60% of ink_crop for heatmap analysis in `_is_blank_cell`).
-4. **No CI/CD**: No GitHub Actions or automation pipeline.
-5. **Docker unverified**: docker-compose.yml written but not tested on clean environment.
-6. **CORS wide open**: `allow_origins=["*"]`
-7. **Type sync manual**: `frontend/src/lib/types.ts` must be manually kept in sync with `backend/api/schemas.py`.
-8. **Default cuda_device mismatch**: `settings.py` defaults to `cuda:7` (dev machine), override via env var.
-
-## ACTIVE BRANCHES
-
-| Branch | Status | Summary |
-|---|---|---|
-| `main` | Stable baseline | — |
-| `feat/websocket-progress` | Pushed | WebSocket progress wired to pipeline, simplified text_reformat (18→4 params), modernized frontend (step indicator, ProgressBar shimmer) |
-| `feat/zoomable-image` | Pushed (current) | ZoomableImage component (scroll zoom, drag pan, clamp), vite polling mode |
-
-## RECIPES
-
-### Recipe: Add a new VLM backend (e.g., Anthropic Claude)
-1. Edit `services/vlm_service.py`: add strategy method, update `from_settings()` factory
-2. Edit `config/settings.py` → `VLMSettings`: add API key + model name fields
-3. Update `.env.example` and `VLMSettings.backend` Literal type
-
-### Recipe: Add a new API endpoint
-1. Create `backend/api/routes/myroute.py` with `router = APIRouter(prefix="/myroute")`
-2. Add schemas to `schemas.py`
-3. Register in `api/app.py`: `app.include_router(myroute.router, prefix=prefix)`
-
-### Recipe: Add a new OCR pipeline stage
-1. Create module in `backend/core/`
-2. Import and call in `ocr_pipeline.py` → `run()`, add `on_progress(stage_name, value)` call
-3. Add settings to `OCRPipelineSettings` if configurable
-
-### Recipe: Fix heatmap neighbor bleed in blank cell detection
-In `core/text_reformat.py`, modify `_is_blank_cell()` to use center crop:
-```python
-_HEAT_CENTER_MARGIN = 0.20  # trim 20% from each edge
-
-def _center_heat_stats(ink_crop, active_threshold):
-    if ink_crop is None or ink_crop.size == 0:
-        return 0.0, 0.0, 0.0
-    h, w = ink_crop.shape[:2]
-    my, mx = max(1, int(h * _HEAT_CENTER_MARGIN)), max(1, int(w * _HEAT_CENTER_MARGIN))
-    center = ink_crop[my:max(my+1, h-my), mx:max(mx+1, w-mx)]
-    return _heat_stats(center, active_threshold)
-```
-Then replace `_heat_stats(ink_crop, ...)` with `_center_heat_stats(ink_crop, ...)` in `_is_blank_cell`.
-
-### Recipe: Change VLM model
-- vLLM: `VLLM_MODEL=new-model/name` in root `.env`
-- API backends: `VLM__GEMINI_MODEL_NAME=...` or `VLM__OPENAI_MODEL_NAME=...`
-
-### Recipe: Enable debug mode
-```bash
-PIPELINE__DEBUG_ENABLED=true
-PIPELINE__DEBUG_DIR=./debug/ocr_pipeline
-```
-
-### Recipe: Local development without Docker
-```bash
-# Terminal 1 (optional vLLM)
-vllm serve Qwen/Qwen3-VL-2B-Instruct --port 8001
-
-# Terminal 2: Backend
-cd backend && cp .env.example .env
-pip install -e ".[dev]"
-uvicorn api.app:app --host 127.0.0.1 --port 8080 --reload
-
-# Terminal 3: Frontend
-cd frontend && npm install && npm run dev
-# → http://localhost:5173 (proxies /api to :8080)
-```
-
-### Recipe: Build and deploy with Docker Compose
-```bash
-cp backend/.env.example backend/.env
-docker compose up --build -d
-# frontend: http://localhost:3000
-# backend:  http://localhost:8080
-# vllm:     http://localhost:8001
-```
+- backend/
+  - api/
+    - app.py
+    - deps.py
+    - schemas.py
+    - ws.py
+    - routes/
+      - corner.py
+      - ocr.py
+      - health.py
+  - config/
+    - settings.py
+  - core/
+    - perspective.py
+    - grid_extractor.py
+    - rotation.py
+    - print_removal.py
+    - image_utils.py
+    - text_reformat.py
+  - services/
+    - craft_service.py
+    - vlm_service.py
+    - ocr_pipeline.py
+  - tests/
+    - test_text_reformat.py
+- frontend/
+  - src/
+    - App.tsx
+    - components/
+      - Layout.tsx
+      - ImageDropzone.tsx
+      - CornerEditor.tsx
+      - ProgressBar.tsx
+      - ManuscriptView.tsx
+      - ZoomableImage.tsx
+      - ExportMenu.tsx
+    - hooks/
+      - useOCRProgress.ts
+      - useBatchProgress.ts
+    - lib/
+      - api.ts
+      - types.ts
+      - export.ts
+    - pages/
+      - UploadPage.tsx
+      - ResultPage.tsx
+      - BatchUploadPage.tsx
+      - BatchResultPage.tsx
+
+-------------------------------------------------------------------------------
+
+## 5. BACKEND MODULE DETAILS
+
+### 5.1 api/app.py
+
+- FastAPI title: Traditional Chinese Handwriting OCR
+- FastAPI version: 3.0.0
+- CORS: allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
+- Routers mounted under /api/v1:
+  - health
+  - corner
+  - ocr
+  - ws
+
+Lifespan startup:
+1. load settings
+2. create CRAFTService (device from settings.cuda_device)
+3. start CRAFTService worker
+4. create VLMService.from_settings
+5. create OCRPipeline
+6. register services in deps
+
+Lifespan shutdown:
+1. stop CRAFTService
+2. clear deps singletons
+
+### 5.2 api/deps.py pattern
+
+- Module-level singleton storage
+- get_craft(), get_vlm(), get_pipeline() used with FastAPI Depends
+
+### 5.3 api/schemas.py (contract source of truth)
+
+Enums:
+- TaskStatus: pending | processing | completed | failed
+
+Single OCR models:
+- Point(x, y)
+- CornerDetectResponse(task_id, corners[4], confidence, preview_url)
+- CornerCorrectRequest(task_id, corners[4])
+- CornerCorrectResponse(corrected, preview_url)
+- OCROptions(auto_rotate, remove_print, auto_split)
+- OCRSubmitResponse(task_id, status)
+- ColumnData(col_index, text, spacing_indexes, num_rows)
+- OCRStatusResponse(task_id, status, progress, title, text, columns,
+  rotation_angle, elapsed_seconds, error)
+
+Batch models:
+- BatchTaskItem(task_id, filename, status)
+- BatchSubmitResponse(batch_id, tasks[])
+- BatchStatusResponse(batch_id, total, completed, failed, processing,
+  progress, tasks[])
+- BatchPrepareItem(task_id, filename, corners, confidence)
+- BatchPrepareResponse(items[])
+- BatchCorrectionItem(task_id, corners)
+- BatchSubmitRequest(corrections[], auto_rotate, remove_print, auto_split)
+
+Health:
+- HealthResponse(status, craft_loaded, vlm_backend, version)
+
+WebSocket payloads:
+- WSProgressMessage(task_id, stage, progress, message, status)
+- WSBatchProgressMessage(batch_id, progress, completed, failed, total, status)
+
+### 5.4 api/ws.py
+
+Connection registry:
+- _connections: Dict[str, Set[WebSocket]]
+- Single key: task_id
+- Batch key: "batch:{batch_id}"
+
+Endpoints:
+- /ws/{task_id}
+- /ws/batch/{batch_id}
+
+Broadcast functions:
+- broadcast_progress(...)
+- broadcast_batch_progress(...)
+
+Behavior:
+- sends JSON payload from Pydantic model_dump_json
+- drops dead sockets silently
+- keeps socket alive by waiting for receive_text in loop
+
+### 5.5 api/routes/corner.py
+
+In-memory store:
+- _pending_images: task_id -> BGR image
+
+POST /corner/detect:
+- decode upload with cv2.imdecode
+- runs detect_corners
+- fallback to full-image corners if:
+  - detection failed OR
+  - contour area ratio < 0.35
+- confidence is 1.0 when valid, else 0.0
+- stores original image in _pending_images[task_id]
+
+POST /corner/correct:
+- pops image by task_id
+- warps with provided corners
+- stores warped image back into _pending_images[task_id]
+
+### 5.6 api/routes/ocr.py
+
+In-memory stores:
+- _tasks: task_id -> status/progress/result/error
+- _batches: batch_id -> {task_ids, filenames}
+
+Single route behavior:
+- POST /ocr/upload
+  - if task_id provided and exists in _pending_images, consumes warped image
+  - else decodes uploaded file as new task
+  - sets _tasks[task_id] to processing
+  - executes _run_ocr in executor thread
+
+- GET /ocr/{task_id}
+  - returns task status/result
+  - 404 if task not found
+
+Batch route behavior:
+- POST /ocr/batch/prepare
+  - files required, max 50
+  - skips invalid images
+  - corner detect per image with same 0.35 fallback rule
+  - stores originals in _pending_images
+  - returns items[] with task_id/filename/corners/confidence
+
+- POST /ocr/batch/submit
+  - requires corrections[]
+  - for each correction:
+    - pop original from _pending_images
+    - warp using provided corners
+    - set _tasks[task_id] processing
+    - run _run_batch_ocr in executor
+  - creates _batches[batch_id] with task list
+  - note: returned BatchTaskItem.filename is currently empty string
+
+- GET /ocr/batch/{batch_id}
+  - aggregates completed/failed/processing/progress
+  - returns per-task OCRStatusResponse list
+
+Thread/async bridge details:
+- Executor thread updates _tasks
+- Progress bridge uses asyncio.run_coroutine_threadsafe to call async WS broadcast
+
+### 5.7 services/ocr_pipeline.py
+
+Public API:
+- run(image, auto_rotate?, remove_print?, auto_split?, debug?, debug_tag?, on_progress?)
+
+Pipeline design highlights:
+- single CRAFT pass + heatmap reuse where possible
+- optional image splitting before processing
+- optional rotation correction
+- optional print removal
+- grid extraction
+- vertical-to-horizontal reformat
+- concurrent VLM OCR per column
+- final text merge and title extraction
+
+Single-part progress mapping (core):
+- 0.03, 0.06: image analysis/splitting
+- 0.05-0.20: CRAFT detect
+- 0.22-0.35: rotation
+- 0.37-0.45: print removal
+- 0.47-0.55: grid extraction
+- 0.57-0.62: text formatting
+- 0.63-0.93: VLM column OCR
+- 0.97: text merge
+
+Returned OCRResult fields:
+- text
+- title
+- columns[]
+- rotation_angle
+- print_removed
+- was_split
+- num_columns
+- elapsed_seconds
+- debug_dir
+
+### 5.8 core/text_reformat.py
+
+Key constants:
+- _LINE_THICKNESS_RATIO = 0.10
+- _LINE_SPAN_RATIO = 0.50
+- _HEAT_ACTIVE_THRESHOLD = 0.35
+- _HEAT_RESCUE_ACTIVE = 0.03
+- _HEAT_CENTER_MARGIN = 0.20
+
+TextReformatConfig fields:
+- spacing
+- binary_threshold
+- blank_ink_ratio
+- heat_rescue_peak
+
+Blank-cell decision (priority order):
+1. strong heat peak -> not blank
+2. no ink fill -> blank
+3. line-shaped ink -> blank unless heat_active >= rescue threshold
+4. sparse ink -> blank if heat exists, otherwise keep conservatively
+5. otherwise not blank
+
+Important implementation note:
+- heat stats are computed on center crop via _center_heat_stats
+  to reduce neighbor-bleed false positives.
+
+Text merge behavior:
+- refine_text_raw detects title by leading blanks on first column
+- restores spacing with full-width spaces
+- apply_double_indent_heuristic upgrades likely 1-space indents to 2-space
+
+-------------------------------------------------------------------------------
+
+## 6. FRONTEND MODULE DETAILS
+
+### 6.1 App routing
+
+Routes in App.tsx:
+- / -> UploadPage
+- /result -> ResultPage
+- /batch -> BatchUploadPage
+- /batch/result -> BatchResultPage
+
+### 6.2 UploadPage
+
+State machine:
+- upload -> corner -> submitting
+
+Flow:
+1. detectCorners(file)
+2. optional corner adjustment in CornerEditor
+3. correctCorners(task_id, corners)
+4. submitOCR(file, { task_id })
+5. navigate to /result?taskId=...
+
+### 6.3 ResultPage
+
+- reads taskId from query
+- uses useOCRProgress(taskId)
+- shows ProgressBar while processing
+- done state shows:
+  - original image in ZoomableImage
+  - OCR content (linear/manuscript toggle)
+- supports copy-to-clipboard
+
+### 6.4 BatchUploadPage
+
+Steps:
+- upload
+- preparing
+- review
+- editing
+- submitting
+
+Behavior:
+- accepts up to 50 images
+- prepareBatch(files)
+- confidence badges:
+  - >=0.8 high
+  - >=0.4 medium
+  - <0.4 low (recommend manual adjustment)
+- manual corner edits are local state only
+- submitBatch({ corrections })
+- passes imageUrls/filenames to BatchResultPage through location state
+
+### 6.5 BatchResultPage
+
+- reads batchId from query
+- uses useBatchProgress(batchId)
+- shows aggregate progress and per-task cards
+- supports:
+  - copy one
+  - copy all
+  - export txt/json via ExportMenu
+
+### 6.6 hooks/useOCRProgress.ts
+
+- opens WS /ws/{taskId}
+- polling fallback every 3000ms
+- on WS status completed/failed:
+  - triggers final poll immediately
+  - cleans up ws + interval
+
+### 6.7 hooks/useBatchProgress.ts
+
+- opens WS /ws/batch/{batchId}
+- polling fallback every 3000ms
+- on WS status completed:
+  - fetches full batch status immediately
+
+### 6.8 frontend/lib/api.ts
+
+Health:
+- fetchHealth
+
+Single OCR:
+- detectCorners
+- correctCorners
+- submitOCR
+- pollOCRStatus
+- connectProgressWS
+
+Batch OCR:
+- prepareBatch
+- submitBatch
+- pollBatchStatus
+- connectBatchProgressWS
+
+Important typing mismatch note:
+- CornerDetectResponse in frontend types does not include task_id,
+  so detectCorners returns an augmented type with task_id manually extracted.
+
+### 6.9 frontend/lib/export.ts
+
+Single export:
+- exportSingleTxt
+- exportSingleJson
+
+Batch export:
+- exportBatchTxt
+- exportBatchJson
+
+Downloads are browser-side Blob links (no backend export endpoint).
+
+-------------------------------------------------------------------------------
+
+## 7. CONFIGURATION REFERENCE (backend/config/settings.py)
+
+Settings root:
+- cuda_device: "cuda:7"
+- log_level: "INFO"
+- log_format: simple | default | detailed
+
+CRAFT settings:
+- languages: ["ch_tra"]
+- canvas_size: 2560
+- text_threshold: 0.7
+- link_threshold: 0.4
+- low_text: 0.4
+- mag_ratio: 1.0
+- batch_size: 8
+- batch_timeout: 0.1
+
+VLM settings:
+- backend: vllm | gemini | openai
+- vllm_base_url: http://localhost:8000/v1
+- vllm_api_key: EMPTY
+- vllm_model_name: Qwen/Qwen3.5-9B
+- gemini_model_name: gemini-2.0-flash
+- openai_model_name: gpt-4o
+
+OCR pipeline settings:
+- auto_rotate: true
+- remove_print: true
+- auto_split: true
+- max_workers: 4
+- timeout: 120
+- split_aspect_ratio: 2.0
+- reformat_spacing: 20
+- reformat_binary_threshold: 128
+- reformat_blank_ink_ratio: 0.04
+- reformat_heat_rescue_peak: 0.40
+- debug_enabled: true
+- debug_dir: ./debug/ocr_pipeline
+
+Server settings:
+- host: 0.0.0.0
+- port: 8080
+- workers: 1
+- upload_dir: ./uploads
+- max_upload_size_mb: 20
+
+Env nesting delimiter:
+- "__"
+- Example: VLM__BACKEND=openai
+
+-------------------------------------------------------------------------------
+
+## 8. TESTS, BUILD, AND DEV COMMANDS
+
+Backend (from pyproject.toml):
+- install dev deps: pip install -e ".[dev]"
+- tests: pytest
+- lint: ruff check .
+
+Frontend (from package.json):
+- dev: npm run dev
+- lint: npm run lint
+- build: npm run build
+- preview: npm run preview
+
+Existing focused tests:
+- backend/tests/test_text_reformat.py
+  - 9 tests covering blank-cell and text refine behavior
+
+-------------------------------------------------------------------------------
+
+## 9. KNOWN ISSUES / RISKS (CURRENT)
+
+1. Persistence gap
+- _tasks, _pending_images, _batches are in-memory only.
+- restart loses all running/prepared jobs.
+
+2. CORS is fully open
+- allow_origins=["*"] in production is risky.
+
+3. Batch submit filename gap
+- BatchSubmitResponse currently returns filename="" for each task.
+
+4. Documentation drift risk
+- Some historical docs reference v3.1.0, but runtime code is 3.0.0.
+
+5. Frontend type mismatch around corner detect task_id
+- helper compensates at runtime, but type contract is inconsistent.
+
+-------------------------------------------------------------------------------
+
+## 10. AGENT OPERATION RULES FOR THIS REPO
+
+When modifying code, follow these repo-specific rules:
+
+1. If backend schema changes:
+- update backend/api/schemas.py
+- update frontend/src/lib/types.ts
+- verify frontend/src/lib/api.ts callers
+
+2. If route paths/params change:
+- update backend route file
+- update frontend lib/api.ts
+- update page/hook callers
+
+3. If progress payload changes:
+- update backend ws schemas and broadcaster
+- update both hooks: useOCRProgress and useBatchProgress
+
+4. If text_reformat logic changes:
+- run/expand backend/tests/test_text_reformat.py
+- preserve center-heat crop intent unless intentionally replaced
+
+5. If changing task storage model (e.g. Redis):
+- migrate _tasks/_pending_images/_batches behavior consistently
+- keep single and batch progress behavior equivalent
+
+-------------------------------------------------------------------------------
+
+## 11. QUICK RECIPES
+
+### Add a new VLM backend
+1. Extend VLMSettings in backend/config/settings.py
+2. Implement strategy in backend/services/vlm_service.py
+3. Wire selection in factory method
+4. Update env docs and any prompt/model assumptions
+
+### Add a new backend endpoint
+1. Add route under backend/api/routes/
+2. Define request/response in backend/api/schemas.py
+3. Register router in backend/api/app.py if new file
+4. Add client function in frontend/src/lib/api.ts
+5. Add/update frontend types in frontend/src/lib/types.ts
+
+### Add a new OCR stage
+1. Integrate stage in backend/services/ocr_pipeline.py
+2. Emit on_progress stage/progress
+3. Ensure frontend hooks display new stage safely
+4. Update tests/docs
+
+### Harden for production
+1. Add persistent task store (Redis)
+2. Restrict CORS origins
+3. Add CI: ruff + pytest + frontend lint/build
+4. Validate docker compose on clean machine
